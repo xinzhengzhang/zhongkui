@@ -59,10 +59,17 @@ export class ProfileAnalyzer {
     const actions: BazelAction[] = [];
     
     // Bazel profile events we're interested in:
-    // - Category "action" events represent individual action executions
+    // - Categories that represent actual action executions
     // - Events with "ph": "X" are complete events with duration
+    const actionCategories = [
+      'action processing',
+      'complete action execution',
+      'local action execution',
+      'action processing'
+    ];
+    
     const actionEvents = profileData.traceEvents.filter(event => 
-      event.cat === 'action' && 
+      actionCategories.includes(event.cat) && 
       event.ph === 'X' && 
       event.dur !== undefined
     );
@@ -79,6 +86,13 @@ export class ProfileAnalyzer {
     }
 
     logger.info(`Extracted ${actions.length} actions from profile`);
+    
+    // Debug: log all unique targets/packages from profile
+    const allTargets = [...new Set(actions.map(a => a.target))];
+    const allPackages = [...new Set(actions.map(a => this.extractPackageFromTarget(a.target)))];
+    logger.info(`Profile contains targets: ${allTargets.slice(0, 10).join(', ')}${allTargets.length > 10 ? ` (and ${allTargets.length - 10} more)` : ''}`);
+    logger.info(`Profile contains packages: ${allPackages.join(', ')}`);
+    
     return actions;
   }
 
@@ -130,22 +144,47 @@ export class ProfileAnalyzer {
    * Extract target label from profile event
    */
   private extractTargetFromEvent(event: ProfileEvent): string | null {
-    // Try different patterns to extract target
-    const patterns = [
-      /\/\/[^:\s]+:[^\s]+/,  // Match //path/to/package:target
-      /(@\w+)?\/\/[^:\s]+:[^\s]+/,  // Match external repo targets
-    ];
+    // Priority 1: Use args.target if available (most reliable)
+    if (event.args && event.args.target) {
+      return event.args.target;
+    }
 
-    for (const pattern of patterns) {
-      const match = event.name.match(pattern);
-      if (match) {
-        return match[0];
+    // Priority 2: Check other args fields
+    if (event.args) {
+      if (event.args.label) {
+        return event.args.label;
+      }
+      if (event.args.primaryOutput) {
+        // Extract target from primary output path
+        const match = event.args.primaryOutput.match(/\/\/([^:]+):/);
+        if (match) {
+          return `//${match[1]}:${event.args.primaryOutput.split(':').pop()}`;
+        }
       }
     }
 
-    // Try extracting from args
-    if (event.args && event.args.target) {
-      return event.args.target;
+    // Priority 3: Extract from event name
+    // Pattern 1: "ActionType //path/to/package:target"
+    let match = event.name.match(/\/\/([^:\s]+:[^\s]+)/);
+    if (match) {
+      return match[0];
+    }
+    
+    // Priority 4: Fallback - infer from file path in event name
+    // Example: "KotlinNativePrebuild examples/di-example/di-full-example/di_full_example/..."
+    const nameParts = event.name.split(' ');
+    if (nameParts.length > 1 && event.args?.mnemonic) {
+      const filePath = nameParts[1];
+      // Try to extract package from file path
+      const packageMatch = filePath.match(/^([^\/]+(?:\/[^\/]+)*)/);
+      if (packageMatch) {
+        const pathParts = packageMatch[1].split('/');
+        // For paths like "examples/di-example/di-full-example/..."
+        // Use the first 2-3 path components as package
+        const packageDepth = Math.min(pathParts.length, 3);
+        const potentialPackage = pathParts.slice(0, packageDepth).join('/');
+        return `//${potentialPackage}:${event.args.mnemonic}`;
+      }
     }
 
     return null;
@@ -155,14 +194,12 @@ export class ProfileAnalyzer {
    * Extract action mnemonic from event
    */
   private extractMnemonic(event: ProfileEvent): string {
-    // Try to extract mnemonic from event name
-    // Examples: "CppCompile", "Javac", "GoCompile"
-    
+    // Priority 1: Use args.mnemonic if available (most reliable)
     if (event.args && event.args.mnemonic) {
       return event.args.mnemonic;
     }
 
-    // Extract from event name - typically the first word
+    // Priority 2: Extract from event name - typically the first word
     const parts = event.name.split(' ');
     if (parts.length > 0 && !parts[0].startsWith('//')) {
       return parts[0];
@@ -193,7 +230,20 @@ export class ProfileAnalyzer {
     logger.info(`Filtering ${actions.length} actions by target pattern: ${targetPattern}`);
     
     const regex = this.convertPatternToRegex(targetPattern);
-    return actions.filter(action => regex.test(action.target));
+    const filteredActions = actions.filter(action => regex.test(action.target));
+    
+    // Debug: show which actions matched and which didn't
+    logger.info(`${filteredActions.length} actions matched target pattern`);
+    if (filteredActions.length > 0) {
+      logger.info(`Matched action targets: ${filteredActions.map(a => a.target).slice(0, 5).join(', ')}${filteredActions.length > 5 ? ` (and ${filteredActions.length - 5} more)` : ''}`);
+    }
+    
+    if (filteredActions.length < actions.length) {
+      const unmatched = actions.filter(action => !regex.test(action.target));
+      logger.info(`${unmatched.length} actions did not match. Examples: ${unmatched.map(a => a.target).slice(0, 3).join(', ')}`);
+    }
+    
+    return filteredActions;
   }
 
   /**
@@ -209,7 +259,20 @@ export class ProfileAnalyzer {
     // Ensure exact match
     regexPattern = `^${regexPattern}$`;
     
+    logger.info(`Target pattern '${pattern}' converted to regex: ${regexPattern}`);
+    
     return new RegExp(regexPattern);
+  }
+
+  /**
+   * Extract package path from a Bazel target
+   */
+  private extractPackageFromTarget(target: string): string {
+    if (target.startsWith('//')) {
+      const colonIndex = target.indexOf(':');
+      return colonIndex > 0 ? target.slice(2, colonIndex) : target.slice(2);
+    }
+    return target;
   }
 
   /**

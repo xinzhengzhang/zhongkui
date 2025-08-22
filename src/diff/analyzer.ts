@@ -1,5 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { promises as fs } from 'fs';
+import { join } from 'path';
 import { FileChange } from '../types';
 import { logger } from '../utils/logger';
 
@@ -9,15 +11,39 @@ const execAsync = promisify(exec);
  * Analyzes file changes to determine which Bazel packages are impacted
  */
 export class DiffAnalyzer {
+  private repoRoot: string;
+  
+  constructor(repoRoot: string) {
+    this.repoRoot = repoRoot;
+  }
+
   /**
-   * Analyze file changes in the repository
+   * Analyze file changes in the repository and map to Bazel packages accurately
    */
-  async analyzeChanges(repoRoot: string, baseBranch = 'origin/main'): Promise<FileChange[]> {
+  async analyzeChanges(repoRoot: string, baseBranch = 'origin/master'): Promise<FileChange[]> {
     logger.info(`Analyzing file changes in ${repoRoot}`);
     
     try {
-      const { stdout } = await execAsync(`cd ${repoRoot} && git diff --name-status ${baseBranch}...HEAD`);
-      return this.parseGitDiff(stdout);
+      // Get committed changes between base branch and HEAD
+      const committedCommand = `cd ${repoRoot} && git diff --name-status ${baseBranch}...HEAD`;
+      logger.info(`Executing git diff command for committed changes: ${committedCommand}`);
+      
+      // Get uncommitted changes (both staged and unstaged)
+      const uncommittedCommand = `cd ${repoRoot} && git diff --name-status HEAD`;
+      logger.info(`Executing git diff command for uncommitted changes: ${uncommittedCommand}`);
+      
+      const [committedResult, uncommittedResult] = await Promise.all([
+        execAsync(committedCommand).catch(() => ({ stdout: '' })),
+        execAsync(uncommittedCommand).catch(() => ({ stdout: '' }))
+      ]);
+      
+      const combinedOutput = [committedResult.stdout, uncommittedResult.stdout]
+        .filter(output => output.trim())
+        .join('\n');
+      
+      logger.info(`Combined git diff output length: ${combinedOutput.length} characters`);
+      
+      return await this.parseGitDiffWithBuildFileMapping(combinedOutput);
     } catch (error) {
       logger.error('Failed to analyze file changes:', error);
       throw error;
@@ -25,9 +51,9 @@ export class DiffAnalyzer {
   }
 
   /**
-   * Parse git diff output to extract file changes
+   * Parse git diff output and find Bazel packages by locating BUILD files
    */
-  private parseGitDiff(diffOutput: string): FileChange[] {
+  private async parseGitDiffWithBuildFileMapping(diffOutput: string): Promise<FileChange[]> {
     const lines = diffOutput.trim().split('\n').filter(line => line);
     const changes: FileChange[] = [];
 
@@ -36,7 +62,9 @@ export class DiffAnalyzer {
       if (!path) continue;
 
       const changeType = this.mapGitStatus(status);
-      const packagePath = this.getBazelPackage(path);
+      
+      // Find the package by looking for the first BUILD file in parent directories
+      const packagePath = await this.findPackageByBuildFile(path);
 
       changes.push({
         path,
@@ -45,7 +73,57 @@ export class DiffAnalyzer {
       });
     }
 
+    // Debug: log detected packages
+    const packages = [...new Set(changes.map(c => c.package))];
+    logger.info(`Detected ${changes.length} file changes in ${packages.length} packages: ${packages.join(', ')}`);
+
     return changes;
+  }
+
+  /**
+   * Find the Bazel package for a file by locating the nearest BUILD file
+   */
+  private async findPackageByBuildFile(filePath: string): Promise<string> {
+    const parts = filePath.split('/');
+    
+    // Start from the file's directory and work up the hierarchy
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const dirPath = parts.slice(0, i).join('/');
+      const fullDirPath = dirPath ? join(this.repoRoot, dirPath) : this.repoRoot;
+      
+      // Check for BUILD or BUILD.bazel files
+      const buildPath = join(fullDirPath, 'BUILD');
+      const buildBazelPath = join(fullDirPath, 'BUILD.bazel');
+      
+      try {
+        // Check if either BUILD file exists
+        const [buildExists, buildBazelExists] = await Promise.all([
+          this.fileExists(buildPath),
+          this.fileExists(buildBazelPath)
+        ]);
+        
+        if (buildExists || buildBazelExists) {
+          return dirPath || '.';
+        }
+      } catch (error) {
+        logger.debug(`Error checking BUILD files in ${fullDirPath}:`, error);
+      }
+    }
+    
+    // If no BUILD file found, return root package
+    return '.';
+  }
+
+  /**
+   * Check if a file exists
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -61,34 +139,6 @@ export class DiffAnalyzer {
       default:
         return 'modified';
     }
-  }
-
-  /**
-   * Determine the Bazel package for a given file path
-   */
-  getBazelPackage(filePath: string): string {
-    const parts = filePath.split('/');
-    
-    // Find the closest BUILD file directory
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const packagePath = parts.slice(0, i + 1).join('/');
-      // In a real implementation, you'd check if BUILD file exists
-      // For now, assume each directory is a potential package
-      if (i === 0 || this.hasBuildFile(packagePath)) {
-        return packagePath;
-      }
-    }
-    
-    return parts[0] || '.';
-  }
-
-  /**
-   * Check if a directory contains a BUILD file (stub implementation)
-   */
-  private hasBuildFile(packagePath: string): boolean {
-    // TODO: Implement actual BUILD file detection
-    // This would check for BUILD, BUILD.bazel files
-    return true;
   }
 
   /**

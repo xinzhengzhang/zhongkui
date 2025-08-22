@@ -1,5 +1,8 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { promises as fs } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { logger } from '../utils/logger';
 
 const execAsync = promisify(exec);
@@ -11,10 +14,18 @@ export interface BazelTarget {
   rule: string;
 }
 
-export interface PackageDependency {
-  package: string;
-  dependencies: string[];
-  dependents: string[];
+export interface DependencyEdge {
+  from: string;
+  to: string;
+  fromPackage: string;
+  toPackage: string;
+}
+
+export interface DependencyGraph {
+  nodes: Set<string>;
+  edges: DependencyEdge[];
+  packageDependencies: Map<string, Set<string>>; // package -> packages it depends on
+  packageDependents: Map<string, Set<string>>;   // package -> packages that depend on it
 }
 
 /**
@@ -89,49 +100,6 @@ export class BazelQuery {
   }
 
   /**
-   * Get direct dependencies of a package
-   */
-  async getPackageDependencies(packagePath: string): Promise<string[]> {
-    try {
-      const query = `kind(".*", deps(//${packagePath}:*)) except //${packagePath}:*`;
-      const { stdout } = await execAsync(
-        `cd ${this.repoRoot} && bazel query --output=package "${query}"`,
-        { timeout: 60000 }
-      );
-
-      return [...new Set(stdout.trim().split('\n').filter(p => p))];
-    } catch (error) {
-      logger.error(`Failed to get dependencies for package ${packagePath}:`, error);
-      return [];
-    }
-  }
-
-  /**
-   * Get packages that depend on the given package within target scope
-   */
-  async getPackageDependents(packagePath: string, targetScope?: string): Promise<string[]> {
-    try {
-      let query: string;
-      if (targetScope) {
-        // Limit dependents to those within the target scope
-        query = `rdeps(${targetScope}, //${packagePath}:*, 1)`;
-      } else {
-        query = `rdeps(//..., //${packagePath}:*, 1)`;
-      }
-      
-      const { stdout } = await execAsync(
-        `cd ${this.repoRoot} && bazel query --output=package "${query}"`,
-        { timeout: 60000 }
-      );
-
-      return [...new Set(stdout.trim().split('\n').filter(p => p && p !== packagePath))];
-    } catch (error) {
-      logger.error(`Failed to get dependents for package ${packagePath}:`, error);
-      return [];
-    }
-  }
-
-  /**
    * Find all packages affected by changes in a given package within target scope
    */
   async getTransitiveDependents(packagePath: string, targetScope?: string, maxDepth = 3): Promise<string[]> {
@@ -177,6 +145,193 @@ export class BazelQuery {
 
     // Use bazel query for complex cases
     return this.getTargetPackage(actionTarget);
+  }
+
+  /**
+   * Build comprehensive dependency graph using cquery for target scope
+   */
+  async buildDependencyGraph(targetScope: string, config?: string): Promise<DependencyGraph> {
+    let tempFile: string | null = null;
+    
+    try {
+      // Create temporary file for large output
+      tempFile = join(tmpdir(), `bazel-cquery-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.txt`);
+      
+      let cqueryCommand = `cd ${this.repoRoot} && bazel cquery --notool_deps --output=graph --nograph:factored "deps(${targetScope})" > "${tempFile}"`;
+      
+      if (config) {
+        cqueryCommand = `cd ${this.repoRoot} && bazel cquery --notool_deps --output=graph --nograph:factored --config=${config} "deps(${targetScope})" > "${tempFile}"`;
+      }
+      
+      // Execute command writing to file (no stdout buffer limit)
+      await execAsync(cqueryCommand, { timeout: 300000 });
+      
+      // Read the result from file
+      const stdout = await fs.readFile(tempFile, 'utf8');
+      
+      return this.parseDependencyGraph(stdout);
+    } catch (error) {
+      logger.error(`Failed to build dependency graph for ${targetScope}:`, error);
+      return {
+        nodes: new Set(),
+        edges: [],
+        packageDependencies: new Map(),
+        packageDependents: new Map()
+      };
+    } finally {
+      // Clean up temporary file
+      if (tempFile) {
+        try {
+          await fs.unlink(tempFile);
+        } catch (cleanupError) {
+          logger.warn(`Failed to clean up temporary file ${tempFile}:`, cleanupError);
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse cquery graph output into structured dependency graph
+   */
+  private parseDependencyGraph(graphOutput: string): DependencyGraph {
+    const nodes = new Set<string>();
+    const edges: DependencyEdge[] = [];
+    const packageDependencies = new Map<string, Set<string>>();
+    const packageDependents = new Map<string, Set<string>>();
+    
+    const lines = graphOutput.trim().split('\n');
+    let nodeCount = 0;
+    let edgeCount = 0;
+    
+    logger.info(`Parsing dependency graph with ${lines.length} lines`);
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine || trimmedLine.startsWith('digraph') || trimmedLine === '}' || trimmedLine.startsWith('node [')) {
+        continue;
+      }
+      
+      // Parse node declarations: "//path/to/package:target (hash)"
+      // Handle both formats: with hash and with null
+      const nodeMatch = trimmedLine.match(/^"([^"]+) \([^)]*\)"$/);
+      if (nodeMatch) {
+        const target = nodeMatch[1];
+        nodes.add(target);
+        nodeCount++;
+        continue;
+      }
+      
+      // Parse edge declarations: "from (hash)" -> "to (hash)" 
+      const edgeMatch = trimmedLine.match(/^"([^"]+) \([^)]*\)" -> "([^"]+) \([^)]*\)"$/);
+      if (edgeMatch) {
+        const from = edgeMatch[1];
+        const to = edgeMatch[2];
+        
+        const fromPackage = this.extractPackageFromLabel(from);
+        const toPackage = this.extractPackageFromLabel(to);
+        
+        nodes.add(from);
+        nodes.add(to);
+        
+        edges.push({
+          from,
+          to,
+          fromPackage,
+          toPackage
+        });
+        edgeCount++;
+        
+        // Build package-level dependency maps
+        if (fromPackage !== toPackage) {
+          // fromPackage depends on toPackage
+          if (!packageDependencies.has(fromPackage)) {
+            packageDependencies.set(fromPackage, new Set());
+          }
+          packageDependencies.get(fromPackage)!.add(toPackage);
+          
+          // toPackage is depended on by fromPackage
+          if (!packageDependents.has(toPackage)) {
+            packageDependents.set(toPackage, new Set());
+          }
+          packageDependents.get(toPackage)!.add(fromPackage);
+        }
+      }
+    }
+    
+    const allPackages = new Set<string>();
+    nodes.forEach(node => {
+      const pkg = this.extractPackageFromLabel(node);
+      if (pkg) allPackages.add(pkg);
+    });
+    
+    logger.info(`Parsed ${nodeCount} node declarations, ${edgeCount} edge declarations`);
+    logger.info(`Built dependency graph with ${nodes.size} targets, ${edges.length} edges, ${allPackages.size} packages`);
+    
+    // Debug: log first few lines that didn't match to see the format
+    if (nodeCount === 0 && edgeCount === 0) {
+      logger.warn('No nodes or edges parsed! Debugging first 10 non-empty lines:');
+      const nonEmptyLines = lines.filter(line => {
+        const trimmed = line.trim();
+        return trimmed && !trimmed.startsWith('digraph') && trimmed !== '}' && !trimmed.startsWith('node [');
+      }).slice(0, 10);
+      
+      for (const debugLine of nonEmptyLines) {
+        logger.warn(`  Line: "${debugLine}"`);
+        const nodeTest = debugLine.match(/^"([^"]+) \([^)]*\)"$/);
+        const edgeTest = debugLine.match(/^"([^"]+) \([^)]*\)" -> "([^"]+) \([^)]*\)"$/);
+        logger.warn(`    Node match: ${!!nodeTest}, Edge match: ${!!edgeTest}`);
+      }
+    }
+    
+    logger.info(`Sample packages: ${Array.from(allPackages).slice(0, 10).join(', ')}${allPackages.size > 10 ? ` (and ${allPackages.size - 10} more)` : ''}`);
+    
+    return {
+      nodes,
+      edges,
+      packageDependencies,
+      packageDependents
+    };
+  }
+
+  /**
+   * Get all packages that transitively depend on changed packages using pre-built graph
+   */
+  getTransitiveDependentsFromGraph(
+    changedPackages: string[], 
+    dependencyGraph: DependencyGraph,
+    maxDepth = 3
+  ): Map<string, Set<string>> {
+    const result = new Map<string, Set<string>>();
+    
+    // Initialize result map
+    for (const changedPkg of changedPackages) {
+      result.set(changedPkg, new Set());
+    }
+    
+    // For each changed package, find its transitive dependents
+    for (const changedPkg of changedPackages) {
+      const visited = new Set<string>();
+      const queue: Array<{pkg: string; depth: number}> = [{pkg: changedPkg, depth: 0}];
+      
+      while (queue.length > 0) {
+        const {pkg, depth} = queue.shift()!;
+        
+        if (visited.has(pkg) || depth >= maxDepth) {
+          continue;
+        }
+        visited.add(pkg);
+        
+        const dependents = dependencyGraph.packageDependents.get(pkg) || new Set();
+        for (const dependent of dependents) {
+          if (dependent !== changedPkg) {
+            result.get(changedPkg)!.add(dependent);
+            queue.push({pkg: dependent, depth: depth + 1});
+          }
+        }
+      }
+    }
+    
+    return result;
   }
 
   /**

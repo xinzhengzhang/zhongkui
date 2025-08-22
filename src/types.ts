@@ -43,8 +43,6 @@ export interface PackageDependencyGraph {
 
 export interface PackageNode {
   packagePath: string;
-  dependencies: string[];
-  dependents: string[];
   actions: BazelAction[];
   impactWeight: number; // Weight in impact attribution
 }
