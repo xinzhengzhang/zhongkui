@@ -108,13 +108,33 @@ function parseBazelCommand(bazelCommand: string) {
   }
   
   // Parse startup options (before the command)
-  while (i < parts.length && parts[i].startsWith('--') && !['build', 'test', 'run'].includes(parts[i])) {
-    startupOpts.push(parts[i]);
-    i++;
-    // Handle options with values
-    if (i < parts.length && !parts[i].startsWith('--')) {
-      startupOpts[startupOpts.length - 1] += `=${parts[i]}`;
+  while (i < parts.length) {
+    const arg = parts[i];
+    
+    // Check if this is a bazel command
+    if (['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(arg)) {
+      break;
+    }
+    
+    // If it starts with --, it's a startup option
+    if (arg.startsWith('--')) {
+      if (arg.includes('=')) {
+        // Option with value in same arg: --output_base=/tmp/path
+        startupOpts.push(arg);
+      } else {
+        // Option may have value in next arg: --output_base /tmp/path
+        startupOpts.push(arg);
+        // Check if next arg is a value (not starting with -- and not a command)
+        if (i + 1 < parts.length && !parts[i + 1].startsWith('--') && 
+            !['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(parts[i + 1])) {
+          i++;
+          startupOpts[startupOpts.length - 1] += `=${parts[i]}`;
+        }
+      }
       i++;
+    } else {
+      // Not a startup option, must be the command or something unexpected
+      break;
     }
   }
   
