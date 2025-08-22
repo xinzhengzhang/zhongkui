@@ -1,7 +1,7 @@
 import winston from 'winston';
 
 export const logger = winston.createLogger({
-  level: 'info',
+  level: 'warn', // Default to warn level, only show warnings and errors
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
@@ -18,4 +18,18 @@ if (process.env.NODE_ENV !== 'production') {
   logger.add(new winston.transports.Console({
     format: winston.format.simple()
   }));
+}
+
+/**
+ * Enable verbose logging (info level)
+ */
+export function enableVerbose(): void {
+  logger.level = 'info';
+}
+
+/**
+ * Disable verbose logging (warn level)
+ */
+export function disableVerbose(): void {
+  logger.level = 'warn';
 }

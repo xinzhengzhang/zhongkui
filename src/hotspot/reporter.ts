@@ -10,7 +10,7 @@ export class HotspotReporter {
   /**
    * Generate a comprehensive report for a single build analysis
    */
-  async generateReport(analysis: BuildAnalysis, outputDir: string = 'report/'): Promise<void> {
+  async generateReport(analysis: BuildAnalysis, outputDir: string = 'report/'): Promise<{jsonPath: string, mdPath: string}> {
     logger.info(`Generating report for profile: ${analysis.profileId}`);
 
     // Ensure output directory exists
@@ -30,11 +30,16 @@ export class HotspotReporter {
     await writeFile(fileName, JSON.stringify(report, null, 2));
     
     // Also generate human-readable report
-    const humanReport = this.generateHumanReadableReport(report);
+    const humanReport = this.generateHumanReadableReport(report, analysis);
     const humanFileName = join(outputDir, `report-${analysis.profileId}-${Date.now()}.md`);
     await writeFile(humanFileName, humanReport);
 
     logger.info(`Reports generated: ${fileName}, ${humanFileName}`);
+    
+    return {
+      jsonPath: fileName,
+      mdPath: humanFileName
+    };
   }
 
   /**
@@ -115,7 +120,7 @@ export class HotspotReporter {
   /**
    * Generate human-readable markdown report
    */
-  private generateHumanReadableReport(report: any): string {
+  private generateHumanReadableReport(report: any, fullAnalysis: BuildAnalysis): string {
     const { summary, hotspots, recommendations } = report;
     
     let markdown = `# Build Hotspot Analysis Report
@@ -161,6 +166,47 @@ export class HotspotReporter {
     changedPackages.forEach(pkg => {
       markdown += `- \`${pkg}\`\n`;
     });
+
+    // Add detailed action analysis for changed packages
+    markdown += `\n## Actions Impacted by Changed Packages\n`;
+    
+    // Find hotspots for changed packages only
+    const changedPackageSet = new Set(changedPackages);
+    const changedPackageHotspots = hotspots.filter((hotspot: PackageHotspot) => 
+      changedPackageSet.has(hotspot.packagePath)
+    );
+    
+    if (changedPackageHotspots.length === 0) {
+      markdown += `\n*No direct actions found in changed packages.*\n`;
+    } else {
+      changedPackageHotspots.forEach((hotspot: PackageHotspot) => {
+        markdown += `\n### Package: \`${hotspot.packagePath}\`\n\n`;
+        
+        // Combine direct and transitive actions, then sort by duration
+        const allActions = [...hotspot.directActions, ...hotspot.transitiveActions];
+        const sortedActions = allActions
+          .sort((a, b) => b.duration - a.duration)
+          .slice(0, 30); // Top 30
+        
+        if (sortedActions.length === 0) {
+          markdown += `*No actions found for this package.*\n`;
+        } else {
+          markdown += `**Top ${Math.min(sortedActions.length, 30)} Actions by Duration:**\n\n`;
+          markdown += `| Rank | Target | Mnemonic | Duration (s) | Type |\n`;
+          markdown += `|------|--------|----------|--------------|------|\n`;
+          
+          sortedActions.forEach((action, index) => {
+            const isDirect = hotspot.directActions.includes(action);
+            const actionType = isDirect ? 'Direct' : 'Transitive';
+            markdown += `| ${index + 1} | \`${action.target}\` | ${action.mnemonic} | ${(action.duration / 1000).toFixed(3)} | ${actionType} |\n`;
+          });
+          
+          const directCount = hotspot.directActions.length;
+          const transitiveCount = hotspot.transitiveActions.length;
+          markdown += `\n*${directCount} direct actions, ${transitiveCount} transitive actions*\n`;
+        }
+      });
+    }
 
     return markdown;
   }

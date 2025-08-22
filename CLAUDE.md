@@ -123,11 +123,17 @@ npm run typecheck
 # Generate a profile during build
 bazel build --profile=profile.json //src/...
 
-# Analyze the profile with target scope  
+# Method 1: Analyze existing profile
 bazel run //src:zhongkui -- analyze -p profile.json -t "//src/..." -r /path/to/repo
 
-# Analyze specific targets
-bazel run //src:zhongkui -- analyze -p profile.json -t "//app:*" -r /path/to/repo
+# Method 2: Run and analyze in one step (recommended)
+bazel run //src:zhongkui -- run-and-analyze -c "bazel build //src/... --config=remote"
+
+# Advanced examples
+bazel run //src:zhongkui -- run-and-analyze \
+  -c "bazel test //app:* --config=ci --keep_going" \
+  --keep-profile \
+  --base-branch origin/main
 ```
 
 **Output**: Generates `report-{profileId}-{timestamp}.json` and `report-{profileId}-{timestamp}.md` files for consumption by external data products.

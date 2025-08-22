@@ -173,12 +173,12 @@ export class BazelQuery {
       // Add standard options
       cqueryCommand += ` --notool_deps --output=graph --nograph:factored`;
       
-      // Add command options if provided
+      // Add command options if provided (these are bazel command flags, not query syntax)
       if (bazelOptions?.commandOpts) {
         cqueryCommand += ` ${bazelOptions.commandOpts}`;
       }
       
-      // Add the query and output redirection
+      // Add the query and output redirection (targetScope should not contain options)
       cqueryCommand += ` "deps(${targetScope})" > "${tempFile}"`;
       
       logger.info(`Executing bazel cquery command: ${cqueryCommand}`);
