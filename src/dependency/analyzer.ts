@@ -24,7 +24,7 @@ export class DependencyAnalyzer {
     // Step 1: Build comprehensive dependency graph using cquery (one-time cost)
     if (!this.dependencyGraph && targetScope) {
       logger.info('Building dependency graph using bazel cquery...');
-      this.dependencyGraph = await this.bazelQuery.buildDependencyGraph(targetScope, config);
+      this.dependencyGraph = await this.bazelQuery.buildDependencyGraph(targetScope, { bazelBinary: config });
     }
 
     // Step 2: Resolve packages for all actions using Bazel query

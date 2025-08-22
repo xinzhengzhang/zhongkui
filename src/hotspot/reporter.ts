@@ -1,4 +1,5 @@
-import { writeFile } from 'fs/promises';
+import { writeFile, mkdir } from 'fs/promises';
+import { join, dirname } from 'path';
 import { BuildAnalysis, PackageHotspot } from '../types';
 import { logger } from '../utils/logger';
 
@@ -9,8 +10,11 @@ export class HotspotReporter {
   /**
    * Generate a comprehensive report for a single build analysis
    */
-  async generateReport(analysis: BuildAnalysis): Promise<void> {
+  async generateReport(analysis: BuildAnalysis, outputDir: string = 'report/'): Promise<void> {
     logger.info(`Generating report for profile: ${analysis.profileId}`);
+
+    // Ensure output directory exists
+    await this.ensureDirectoryExists(outputDir);
 
     const report = {
       profileId: analysis.profileId,
@@ -22,15 +26,27 @@ export class HotspotReporter {
       recommendations: this.generateRecommendations(analysis.packageHotspots)
     };
 
-    const fileName = `report-${analysis.profileId}-${Date.now()}.json`;
+    const fileName = join(outputDir, `report-${analysis.profileId}-${Date.now()}.json`);
     await writeFile(fileName, JSON.stringify(report, null, 2));
     
     // Also generate human-readable report
     const humanReport = this.generateHumanReadableReport(report);
-    const humanFileName = `report-${analysis.profileId}-${Date.now()}.md`;
+    const humanFileName = join(outputDir, `report-${analysis.profileId}-${Date.now()}.md`);
     await writeFile(humanFileName, humanReport);
 
     logger.info(`Reports generated: ${fileName}, ${humanFileName}`);
+  }
+
+  /**
+   * Ensure the output directory exists
+   */
+  private async ensureDirectoryExists(outputDir: string): Promise<void> {
+    try {
+      await mkdir(outputDir, { recursive: true });
+    } catch (error) {
+      // Directory might already exist, which is fine
+      logger.debug(`Directory creation result for ${outputDir}:`, error);
+    }
   }
 
   /**

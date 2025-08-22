@@ -19,6 +19,11 @@ program
   .requiredOption('-t, --targets <pattern>', 'Build targets pattern (e.g., "//src/..." or "//app:*")')
   .option('-r, --repo-root <path>', 'Repository root path', process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
+  .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--bazel-binary <path>', 'Path to bazel binary', 'bazel')
+  .option('--startup-opts <opts>', 'Bazel startup options (e.g., "--host_jvm_args=-Xmx4g")')
+  .option('--command-opts <opts>', 'Bazel command options (e.g., "--config=remote")')
+  .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .action(async (options) => {
     try {
       logger.info(`Starting analysis for profile: ${options.profile}, targets: ${options.targets}`);
@@ -37,14 +42,24 @@ program
       
       // Simplified dependency analysis
       const dependencyAnalyzer = new SimpleDependencyAnalyzer(options.repoRoot);
-      const analysis = await dependencyAnalyzer.analyze(allActions, fileChanges, options.targets);
+      const analysis = await dependencyAnalyzer.analyze(
+        allActions, 
+        fileChanges, 
+        options.targets, 
+        {
+          bazelBinary: options.bazelBinary,
+          startupOpts: options.startupOpts,
+          commandOpts: options.commandOpts,
+          cacheMode: options.cacheMode
+        }
+      );
       
       // Set analysis metadata
       analysis.profileId = `profile_${Date.now()}`;
       
       // Generate report
       const reporter = new HotspotReporter();
-      await reporter.generateReport(analysis);
+      await reporter.generateReport(analysis, options.outputDir);
       
       logger.info('Analysis completed successfully');
     } catch (error) {

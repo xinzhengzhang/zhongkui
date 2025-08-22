@@ -150,18 +150,38 @@ export class BazelQuery {
   /**
    * Build comprehensive dependency graph using cquery for target scope
    */
-  async buildDependencyGraph(targetScope: string, config?: string): Promise<DependencyGraph> {
+  async buildDependencyGraph(targetScope: string, bazelOptions?: { bazelBinary?: string; startupOpts?: string; commandOpts?: string }): Promise<DependencyGraph> {
     let tempFile: string | null = null;
     
     try {
       // Create temporary file for large output
       tempFile = join(tmpdir(), `bazel-cquery-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.txt`);
       
-      let cqueryCommand = `cd ${this.repoRoot} && bazel cquery --notool_deps --output=graph --nograph:factored "deps(${targetScope})" > "${tempFile}"`;
+      // Build the bazel cquery command
+      let cqueryCommand = `cd ${this.repoRoot}`;
       
-      if (config) {
-        cqueryCommand = `cd ${this.repoRoot} && bazel cquery --notool_deps --output=graph --nograph:factored --config=${config} "deps(${targetScope})" > "${tempFile}"`;
+      // Use specified bazel binary or default to 'bazel'
+      const bazelBinary = bazelOptions?.bazelBinary || 'bazel';
+      
+      // Add startup options if provided
+      if (bazelOptions?.startupOpts) {
+        cqueryCommand += ` && ${bazelBinary} ${bazelOptions.startupOpts} cquery`;
+      } else {
+        cqueryCommand += ` && ${bazelBinary} cquery`;
       }
+      
+      // Add standard options
+      cqueryCommand += ` --notool_deps --output=graph --nograph:factored`;
+      
+      // Add command options if provided
+      if (bazelOptions?.commandOpts) {
+        cqueryCommand += ` ${bazelOptions.commandOpts}`;
+      }
+      
+      // Add the query and output redirection
+      cqueryCommand += ` "deps(${targetScope})" > "${tempFile}"`;
+      
+      logger.info(`Executing bazel cquery command: ${cqueryCommand}`);
       
       // Execute command writing to file (no stdout buffer limit)
       await execAsync(cqueryCommand, { timeout: 300000 });

@@ -1,15 +1,29 @@
 import { BazelAction, FileChange, BuildAnalysis, PackageHotspot } from '../types';
 import { BazelQuery, DependencyGraph } from '../bazel/query';
 import { logger } from '../utils/logger';
+import { promises as fs } from 'fs';
+import { join } from 'path';
+import { createHash } from 'crypto';
+
+export interface BazelOptions {
+  bazelBinary?: string;
+  startupOpts?: string;
+  commandOpts?: string;
+  cacheMode?: 'force' | 'auto';
+}
 
 /**
  * 简化的依赖分析器 - 按照用户需求重新设计
  */
 export class SimpleDependencyAnalyzer {
   private bazelQuery: BazelQuery;
+  private repoRoot: string;
+  private cacheDir: string;
 
   constructor(repoRoot: string) {
+    this.repoRoot = repoRoot;
     this.bazelQuery = new BazelQuery(repoRoot);
+    this.cacheDir = join(repoRoot, '.zhongkui');
   }
 
   /**
@@ -19,7 +33,7 @@ export class SimpleDependencyAnalyzer {
    * 3. Profile -> 所有 actions 及其 packages
    * 4. 归因：每个 action 追溯到哪个变更 package
    */
-  async analyze(actions: BazelAction[], fileChanges: FileChange[], targetScope: string): Promise<BuildAnalysis> {
+  async analyze(actions: BazelAction[], fileChanges: FileChange[], targetScope: string, bazelOptions?: BazelOptions): Promise<BuildAnalysis> {
     logger.info(`Starting simplified analysis: ${actions.length} actions, ${fileChanges.length} file changes, target: ${targetScope}`);
 
     // Step 1: 提取变更的 packages
@@ -27,7 +41,7 @@ export class SimpleDependencyAnalyzer {
     logger.info(`Changed packages: ${Array.from(changedPackages).join(', ')}`);
 
     // Step 2: 构建依赖图
-    const dependencyGraph = await this.bazelQuery.buildDependencyGraph(targetScope);
+    const dependencyGraph = await this.bazelQuery.buildDependencyGraph(targetScope, bazelOptions);
     logger.info(`Dependency graph: ${dependencyGraph.nodes.size} nodes, ${dependencyGraph.edges.length} edges`);
     
     // Debug: 显示一些关键的依赖关系
@@ -57,7 +71,7 @@ export class SimpleDependencyAnalyzer {
     logger.info(`Actions with packages: ${actionsWithPackages.length} total`);
 
     // Step 4: 归因分析 - 每个 action 追溯到变更的 packages
-    const attributions = this.attributeActionsToChanges(actionsWithPackages, changedPackages, dependencyGraph);
+    const attributions = await this.attributeActionsToChanges(actionsWithPackages, changedPackages, dependencyGraph, bazelOptions);
 
     // Step 5: 生成每个变更 package 的统计
     const packageHotspots = this.calculatePackageStats(attributions, changedPackages);
@@ -69,13 +83,6 @@ export class SimpleDependencyAnalyzer {
       packageHotspots,
       packageDependencyGraph: { packages: new Map() } // 简化，不需要复杂的 package graph
     };
-  }
-
-  /**
-   * 提取变更的 packages
-   */
-  private extractChangedPackages(fileChanges: FileChange[]): Set<string> {
-    return new Set(fileChanges.map(fc => fc.package));
   }
 
   /**
@@ -106,25 +113,34 @@ export class SimpleDependencyAnalyzer {
 
   /**
    * 归因分析：每个 action 追溯到哪些变更 packages
+   * 优化版本：预处理依赖关系，避免重复计算
    */
-  private attributeActionsToChanges(
+  private async attributeActionsToChanges(
     actions: BazelAction[], 
     changedPackages: Set<string>, 
-    dependencyGraph: DependencyGraph
-  ): Array<BazelAction & { contributingPackages: string[] }> {
+    dependencyGraph: DependencyGraph,
+    bazelOptions?: BazelOptions
+  ): Promise<Array<BazelAction & { contributingPackages: string[] }>> {
     logger.info(`\n=== Attribution Analysis ===`);
     logger.info(`Changed packages: ${Array.from(changedPackages).join(', ')}`);
     logger.info(`Analyzing ${actions.length} actions for attribution...\n`);
     
-    return actions.map(action => {
-      const contributingPackages = this.findContributingPackages(action, changedPackages, dependencyGraph);
+    // 优化：预计算依赖关系映射（支持缓存）
+    const targetDependencyCache = await this.precomputeDependencyMappingsWithCache(
+      changedPackages, 
+      dependencyGraph,
+      bazelOptions?.cacheMode || 'auto'
+    );
+    
+    return actions.map((action, index) => {
+      const contributingPackages = this.findContributingPackagesFast(action, changedPackages, targetDependencyCache);
       
       if (contributingPackages.length > 0) {
         logger.info(`✓ Action ${action.target} (${action.duration}ms) <- [${contributingPackages.join(', ')}]`);
         if (contributingPackages.length > 1) {
           logger.info(`  └─ Duration will be split: ${Math.round(action.duration / contributingPackages.length)}ms each`);
         }
-      } else {
+      } else if (index < 10) { // 只显示前10个未归因的action
         logger.debug(`- Action ${action.target} (${action.duration}ms) <- no attribution`);
       }
       
@@ -136,111 +152,183 @@ export class SimpleDependencyAnalyzer {
   }
 
   /**
-   * 找到哪些变更 packages 影响了这个 action
+   * 预计算依赖关系映射，支持磁盘缓存
    */
-  private findContributingPackages(
-    action: BazelAction, 
+  private async precomputeDependencyMappingsWithCache(
+    changedPackages: Set<string>, 
+    dependencyGraph: DependencyGraph,
+    cacheMode: 'force' | 'auto'
+  ): Promise<Map<string, string[]>> {
+    // 生成缓存键（基于依赖图内容和变更包）
+    const cacheKey = this.generateCacheKey(changedPackages, dependencyGraph);
+    const cacheFilePath = join(this.cacheDir, `dependency-mappings-${cacheKey}.json`);
+    
+    logger.info(`Using cache mode: ${cacheMode}`);
+    
+    // 检查是否使用缓存
+    if (cacheMode === 'auto') {
+      const cachedResult = await this.loadFromCache(cacheFilePath);
+      if (cachedResult) {
+        logger.info(`Loaded dependency mappings from cache: ${cacheFilePath}`);
+        return cachedResult;
+      }
+    }
+    
+    // 计算依赖映射
+    logger.info('Computing dependency mappings...');
+    const result = this.precomputeDependencyMappings(changedPackages, dependencyGraph);
+    
+    // 保存到缓存
+    await this.saveToCache(cacheFilePath, result);
+    
+    return result;
+  }
+
+  /**
+   * 生成缓存键
+   */
+  private generateCacheKey(changedPackages: Set<string>, dependencyGraph: DependencyGraph): string {
+    // 基于变更包和依赖图的哈希
+    const input = {
+      changedPackages: Array.from(changedPackages).sort(),
+      dependencyGraphHash: this.hashDependencyGraph(dependencyGraph)
+    };
+    
+    return createHash('sha256')
+      .update(JSON.stringify(input))
+      .digest('hex')
+      .substring(0, 16); // 使用前16个字符
+  }
+
+  /**
+   * 生成依赖图的哈希
+   */
+  private hashDependencyGraph(dependencyGraph: DependencyGraph): string {
+    // 基于节点数量和边的关键信息生成哈希
+    const key = {
+      nodeCount: dependencyGraph.nodes.size,
+      edgeCount: dependencyGraph.edges.length,
+      // 取前100条边作为样本来生成哈希，避免处理过大的数据
+      sampleEdges: dependencyGraph.edges
+        .slice(0, 100)
+        .map(e => `${e.from}->${e.to}`)
+        .sort()
+    };
+    
+    return createHash('sha256')
+      .update(JSON.stringify(key))
+      .digest('hex')
+      .substring(0, 8);
+  }
+
+  /**
+   * 从缓存加载
+   */
+  private async loadFromCache(cacheFilePath: string): Promise<Map<string, string[]> | null> {
+    try {
+      const data = await fs.readFile(cacheFilePath, 'utf8');
+      const parsed = JSON.parse(data);
+      
+      // 验证缓存格式
+      if (parsed && parsed.version === '1.0' && parsed.mappings) {
+        const result = new Map<string, string[]>();
+        Object.entries(parsed.mappings).forEach(([key, value]) => {
+          if (Array.isArray(value)) {
+            result.set(key, value as string[]);
+          }
+        });
+        
+        logger.info(`Cache loaded: ${result.size} mappings`);
+        return result;
+      }
+    } catch (error) {
+      logger.debug(`Failed to load cache from ${cacheFilePath}:`, error);
+    }
+    
+    return null;
+  }
+
+  /**
+   * 保存到缓存
+   */
+  private async saveToCache(cacheFilePath: string, mappings: Map<string, string[]>): Promise<void> {
+    try {
+      // 确保缓存目录存在
+      await fs.mkdir(this.cacheDir, { recursive: true });
+      
+      const cacheData = {
+        version: '1.0',
+        timestamp: new Date().toISOString(),
+        mappings: Object.fromEntries(mappings)
+      };
+      
+      await fs.writeFile(cacheFilePath, JSON.stringify(cacheData, null, 2));
+      logger.info(`Cache saved: ${mappings.size} mappings to ${cacheFilePath}`);
+    } catch (error) {
+      logger.warn(`Failed to save cache to ${cacheFilePath}:`, error);
+    }
+  }
+
+  /**
+   * 预计算依赖关系映射，避免重复遍历（无缓存版本）
+   */
+  private precomputeDependencyMappings(
     changedPackages: Set<string>, 
     dependencyGraph: DependencyGraph
-  ): string[] {
-    const contributingPackages: string[] = [];
-
-    // 情况1: action 直接在变更的 package 中
-    if (action.package && changedPackages.has(action.package)) {
-      contributingPackages.push(action.package);
-      logger.debug(`  Direct: ${action.target} is in changed package ${action.package}`);
-    }
-
-    // 情况2: action 依赖变更的 packages（通过依赖图追溯）
-    for (const changedPkg of changedPackages) {
-      if (!contributingPackages.includes(changedPkg) && this.actionDependsOnPackage(action, changedPkg, dependencyGraph)) {
-        contributingPackages.push(changedPkg);
-        logger.debug(`  Transitive: ${action.target} depends on changed package ${changedPkg}`);
-      }
-    }
-
-    return contributingPackages; // 已经通过 includes 检查去重了
-  }
-
-  /**
-   * 检查 action 是否依赖某个 package
-   */
-  private actionDependsOnPackage(
-    action: BazelAction, 
-    packagePath: string, 
-    dependencyGraph: DependencyGraph
-  ): boolean {
-    if (!action.target) return false;
+  ): Map<string, string[]> {
+    logger.info('Precomputing dependency mappings...');
     
-    logger.debug(`    Checking if ${action.target} depends on package ${packagePath}...`);
+    const targetDependencyCache = new Map<string, string[]>();
     
-    // 方法1: 直接检查 action.target 是否在依赖图中依赖该 package 中的任何 target
-    let foundDirectDependency = false;
-    for (const edge of dependencyGraph.edges) {
-      if (edge.from === action.target && edge.toPackage === packagePath) {
-        logger.debug(`    ✓ Found direct dependency: ${edge.from} -> ${edge.to} (package: ${edge.toPackage})`);
-        foundDirectDependency = true;
-        break;
-      }
-    }
-    
-    if (foundDirectDependency) {
-      return true;
-    }
-    
-    // 方法2: 检查 package 级别的依赖关系作为补充
-    if (action.package) {
-      const actionPackageDeps = dependencyGraph.packageDependencies.get(action.package);
-      if (actionPackageDeps && actionPackageDeps.has(packagePath)) {
-        logger.debug(`    ✓ Found package-level dependency: ${action.package} -> ${packagePath}`);
-        return true;
+    // 为每个target预计算它依赖的changed packages
+    for (const target of dependencyGraph.nodes) {
+      const targetPackage = this.extractPackageFromTarget(target);
+      const contributingPackages: string[] = [];
+      
+      // 情况1：target直接在changed package中
+      if (targetPackage && changedPackages.has(targetPackage)) {
+        contributingPackages.push(targetPackage);
       }
       
-      logger.debug(`    ✗ No dependency found. Action package ${action.package} deps: [${actionPackageDeps ? Array.from(actionPackageDeps).join(', ') : 'none'}]`);
-    }
-    
-    // 方法3: 检查是否有间接路径（递归检查，但限制深度避免性能问题）
-    const hasIndirectPath = this.hasIndirectDependencyPath(action.target, packagePath, dependencyGraph, new Set(), 3);
-    if (hasIndirectPath) {
-      logger.debug(`    ✓ Found indirect dependency path from ${action.target} to package ${packagePath}`);
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * 检查是否有间接依赖路径
-   */
-  private hasIndirectDependencyPath(
-    fromTarget: string,
-    toPackage: string,
-    dependencyGraph: DependencyGraph,
-    visited: Set<string>,
-    maxDepth: number
-  ): boolean {
-    if (maxDepth <= 0 || visited.has(fromTarget)) {
-      return false;
-    }
-    
-    visited.add(fromTarget);
-    
-    // 查找所有直接依赖
-    for (const edge of dependencyGraph.edges) {
-      if (edge.from === fromTarget) {
-        // 如果直接依赖的target属于目标package
-        if (edge.toPackage === toPackage) {
-          return true;
+      // 情况2：target依赖changed packages
+      for (const changedPkg of changedPackages) {
+        if (!contributingPackages.includes(changedPkg)) {
+          // 检查direct dependencies
+          const hasDirectDep = dependencyGraph.edges.some(edge => 
+            edge.from === target && edge.toPackage === changedPkg
+          );
+          
+          if (hasDirectDep) {
+            contributingPackages.push(changedPkg);
+          } else {
+            // 检查package-level dependencies（更快的fallback）
+            const actionPackageDeps = dependencyGraph.packageDependencies.get(targetPackage || '');
+            if (actionPackageDeps && actionPackageDeps.has(changedPkg)) {
+              contributingPackages.push(changedPkg);
+            }
+          }
         }
-        
-        // 递归检查间接依赖
-        if (this.hasIndirectDependencyPath(edge.to, toPackage, dependencyGraph, new Set(visited), maxDepth - 1)) {
-          return true;
-        }
+      }
+      
+      if (contributingPackages.length > 0) {
+        targetDependencyCache.set(target, contributingPackages);
       }
     }
     
-    return false;
+    logger.info(`Precomputed mappings for ${targetDependencyCache.size} targets with dependencies`);
+    return targetDependencyCache;
+  }
+
+  /**
+   * 使用预计算的映射快速查找贡献packages
+   */
+  private findContributingPackagesFast(
+    action: BazelAction, 
+    changedPackages: Set<string>, 
+    targetDependencyCache: Map<string, string[]>
+  ): string[] {
+    // 直接从cache中查找
+    return targetDependencyCache.get(action.target) || [];
   }
 
   /**
@@ -322,5 +410,12 @@ export class SimpleDependencyAnalyzer {
       return colonIndex > 0 ? target.slice(2, colonIndex) : target.slice(2);
     }
     return target;
+  }
+
+  /**
+   * 提取变更的 packages
+   */
+  private extractChangedPackages(fileChanges: FileChange[]): Set<string> {
+    return new Set(fileChanges.map(fc => fc.package));
   }
 }
