@@ -1,0 +1,27 @@
+# Common flags for all Bazel commands
+build --disk_cache=~/.cache/bazel-disk-cache
+query --disk_cache=~/.cache/bazel-disk-cache
+
+# Use Bzlmod (Bazel modules)
+common --enable_bzlmod
+
+# TypeScript configuration - honor tsconfig.json settings
+common --@aspect_rules_ts//ts:skipLibCheck=honor_tsconfig
+
+# Speed up builds  
+build --jobs=auto
+build --local_resources=memory=HOST_RAM*.8
+build --local_resources=cpu=HOST_CPUS*.8
+
+# Better error messages
+build --verbose_failures
+build --show_progress_rate_limit=1
+
+# Test configuration
+test --test_output=errors
+test --test_summary=short
+
+# Debug configuration
+build:debug --compilation_mode=dbg
+build:debug --copt=-g
+build:debug --strip=never

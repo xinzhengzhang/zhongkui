@@ -65,24 +65,55 @@ src/
 - `PackageHotspot`: Aggregated statistics for package-level optimization insights
 - `BuildAnalysis`: Complete analysis results for a single invocation
 
-## Development Commands
+## Build System
+
+The project uses **Bazel** with **rules_js** for building and development:
+
+### Prerequisites
+
+- Bazel 6.0+
+- Node.js 20.6.0 (managed by Bazel)
+- pnpm 7.x (compatible with rules_js)
+
+### Development Commands
 
 ```bash
 # Build the project
-npm run build
+bazel build //src:zhongkui
+bazel build //...  # Build all targets
 
-# Run in development mode  
-npm run dev
+# Run the CLI
+bazel run //src:zhongkui -- [args]
 
-# Run tests
-npm run test
-npm run test:watch
+# Setup VSCode IntelliSense (run when dependencies change)
+./setup-vscode.sh
 
-# Linting and type checking
+# Run in development mode (with hot reload - not implemented)
+npm run dev  # Legacy npm command still available
+
+# Run tests (when implemented)
+bazel test //...
+
+# Linting and type checking (using legacy npm scripts)
 npm run lint
 npm run lint:fix
 npm run typecheck
 ```
+
+### Bazel Configuration
+
+- **MODULE.bazel**: Defines dependencies on `aspect_rules_js`, `aspect_rules_ts`, and `rules_nodejs`
+- **BUILD.bazel**: Sets up npm package linking with `npm_link_all_packages()`
+- **src/BUILD.bazel**: Defines TypeScript compilation with `ts_project` and CLI binary with `js_binary`
+- **.bazelrc**: Contains build optimization flags and TypeScript configuration
+
+### Key Bazel Features Used
+
+- **rules_js**: JavaScript/Node.js build rules
+- **rules_ts**: TypeScript compilation with full type checking
+- **npm_translate_lock**: Imports npm dependencies from `pnpm-lock.yaml`
+- **js_binary**: Creates executable Node.js binaries
+- **ts_project**: Compiles TypeScript to JavaScript with source maps and declarations
 
 ## Usage Patterns
 
@@ -93,10 +124,10 @@ npm run typecheck
 bazel build --profile=profile.json //src/...
 
 # Analyze the profile with target scope  
-zhongkui analyze -p profile.json -t "//src/..." -r /path/to/repo
+bazel run //src:zhongkui -- analyze -p profile.json -t "//src/..." -r /path/to/repo
 
 # Analyze specific targets
-zhongkui analyze -p profile.json -t "//app:*" -r /path/to/repo
+bazel run //src:zhongkui -- analyze -p profile.json -t "//app:*" -r /path/to/repo
 ```
 
 **Output**: Generates `report-{profileId}-{timestamp}.json` and `report-{profileId}-{timestamp}.md` files for consumption by external data products.
@@ -116,11 +147,12 @@ zhongkui analyze -p profile.json -t "//app:*" -r /path/to/repo
 
 Key TODOs for production readiness:
 
-1. **Profile Format Support**: Extend support for different Bazel profile formats and versions
+1. **Bazel Build Integration**: Add proper Bazel test targets and test execution
 2. **BUILD File Detection**: Replace stub package detection with actual BUILD file parsing  
 3. **Performance Optimization**: Add caching and incremental analysis capabilities for large profiles
 4. **Profile Validation**: Add validation for profile completeness and data quality
 5. **Output Format Options**: Support additional output formats for different data product integrations
+6. **Migration Guide**: Document migration from npm build system to Bazel
 
 ## Testing Strategy
 
@@ -129,3 +161,17 @@ Key TODOs for production readiness:
 - Performance tests for large monorepo scenarios and profile parsing
 
 The architecture prioritizes modularity and testability to handle the complexity of large-scale build analysis. Output files are designed for consumption by external data analysis platforms.
+
+## Build System Migration
+
+This project has been migrated from npm/TypeScript to Bazel + rules_js:
+
+### Benefits
+- **Incremental builds**: Only rebuild what changed
+- **Remote caching**: Share build artifacts across developers
+- **Deterministic builds**: Reproducible builds across environments
+- **Parallel execution**: Better utilization of multi-core systems
+- **Ecosystem integration**: Can easily integrate with other Bazel-built tools
+
+### Legacy npm commands
+Some npm scripts are still available for compatibility but should eventually be migrated to Bazel equivalents.

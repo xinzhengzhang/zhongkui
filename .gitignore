@@ -1,4 +1,4 @@
-# Compiled output
+# Compiled output (npm/tsc build)
 dist/
 *.js
 *.js.map
@@ -8,11 +8,17 @@ dist/
 !.eslintrc.js
 
 # Dependencies
+node_modules
 node_modules/
 package-lock.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Bazel build files and directories
+bazel-*
+.bazel/
+.bazelrc.user
 
 # IDE and editor files
 .vscode/

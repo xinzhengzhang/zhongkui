@@ -1,0 +1,33 @@
+module(
+    name = "zhongkui",
+    version = "1.0.0",
+)
+
+# Bazel dependencies
+bazel_dep(name = "aspect_rules_js", version = "1.42.3")
+bazel_dep(name = "aspect_rules_ts", version = "2.4.2")
+bazel_dep(name = "rules_nodejs", version = "6.5.0")
+
+# Node.js toolchain
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "20.6.0")
+
+# TypeScript setup
+rules_ts_ext = use_extension(
+    "@aspect_rules_ts//ts:extensions.bzl",
+    "ext",
+    dev_dependency = True,
+)
+rules_ts_ext.deps()
+use_repo(rules_ts_ext, "npm_typescript")
+
+# npm dependencies
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm", dev_dependency = True)
+
+npm.npm_translate_lock(
+    name = "npm",
+    pnpm_lock = "//:pnpm-lock.yaml",
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+
+use_repo(npm, "npm")
