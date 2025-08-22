@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { promises as fs } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { logger } from '../utils/logger';
 
@@ -148,9 +148,30 @@ export class BazelQuery {
   }
 
   /**
-   * Build comprehensive dependency graph using cquery for target scope
+   * Build comprehensive dependency graph using cquery for target scope with caching support
    */
-  async buildDependencyGraph(targetScope: string, bazelOptions?: { bazelBinary?: string; startupOpts?: string; commandOpts?: string }): Promise<DependencyGraph> {
+  async buildDependencyGraph(targetScope: string, bazelOptions?: { bazelBinary?: string; startupOpts?: string; commandOpts?: string; cacheMode?: 'force' | 'auto' }): Promise<DependencyGraph> {
+    // Generate cache key based on target scope and bazel options
+    const cacheKey = this.generateGraphCacheKey(targetScope, bazelOptions);
+    const cacheDir = join(this.repoRoot, '.zhongkui');
+    const cacheFilePath = join(cacheDir, `dependency-graph-${cacheKey}.json`);
+    
+    // Check for cached dependency graph
+    const cacheMode = bazelOptions?.cacheMode || 'auto';
+    if (cacheMode === 'auto') {
+      try {
+        const cachedGraph = await this.loadGraphFromCache(cacheFilePath);
+        if (cachedGraph) {
+          logger.info(`Using cached dependency graph from: ${cacheFilePath}`);
+          return cachedGraph;
+        }
+      } catch (error) {
+        logger.debug('No valid cache found, proceeding with fresh cquery');
+      }
+    } else {
+      logger.info('Cache mode is "force", skipping cache lookup');
+    }
+
     let tempFile: string | null = null;
     
     try {
@@ -181,6 +202,19 @@ export class BazelQuery {
       // Add the query and output redirection (targetScope should not contain options)
       cqueryCommand += ` "deps(${targetScope})" > "${tempFile}"`;
       
+      // Display the command with colors (import colors from index.ts or define locally)
+      const colors = {
+        reset: '\x1b[0m',
+        bright: '\x1b[1m',
+        green: '\x1b[32m',
+        blue: '\x1b[34m',
+        yellow: '\x1b[33m',
+        cyan: '\x1b[36m'
+      };
+      
+      console.log(`\n${colors.bright}${colors.cyan}🔍 Executing dependency analysis:${colors.reset}`);
+      console.log(`${colors.bright}${colors.blue}   ${cqueryCommand.replace(`cd ${this.repoRoot} && `, '')}${colors.reset}\n`);
+      
       logger.info(`Executing bazel cquery command: ${cqueryCommand}`);
       
       // Execute command writing to file (no stdout buffer limit)
@@ -189,7 +223,20 @@ export class BazelQuery {
       // Read the result from file
       const stdout = await fs.readFile(tempFile, 'utf8');
       
-      return this.parseDependencyGraph(stdout);
+      // Parse the dependency graph
+      const dependencyGraph = this.parseDependencyGraph(stdout);
+      
+      // Save to cache (only if parsing was successful and has data)
+      if (dependencyGraph.nodes.size > 0 && cacheMode === 'auto') {
+        try {
+          await this.saveGraphToCache(cacheFilePath, dependencyGraph);
+          logger.info(`Cached dependency graph to: ${cacheFilePath}`);
+        } catch (error) {
+          logger.warn('Failed to save dependency graph to cache:', error);
+        }
+      }
+      
+      return dependencyGraph;
     } catch (error) {
       logger.error(`Failed to build dependency graph for ${targetScope}:`, error);
       return {
@@ -449,5 +496,97 @@ export class BazelQuery {
     }
     
     return config;
+  }
+
+  /**
+   * Generate cache key for dependency graph based on target scope and options
+   */
+  private generateGraphCacheKey(targetScope: string, bazelOptions?: { bazelBinary?: string; startupOpts?: string; commandOpts?: string }): string {
+    const data = {
+      targetScope,
+      bazelBinary: bazelOptions?.bazelBinary || 'bazel',
+      startupOpts: bazelOptions?.startupOpts || '',
+      commandOpts: bazelOptions?.commandOpts || ''
+    };
+    const { createHash } = require('crypto');
+    const hash = createHash('sha256').update(JSON.stringify(data)).digest('hex');
+    return hash.substring(0, 16);
+  }
+
+  /**
+   * Load dependency graph from cache file
+   */
+  private async loadGraphFromCache(cacheFilePath: string): Promise<DependencyGraph | null> {
+    try {
+      const cacheData = await fs.readFile(cacheFilePath, 'utf8');
+      const cached = JSON.parse(cacheData);
+      
+      // Validate cache format and version
+      if (cached.version !== '1.0' || !cached.graph) {
+        logger.debug('Cache format mismatch, ignoring cache');
+        return null;
+      }
+      
+      // Reconstruct the dependency graph from serialized data
+      const nodes = new Set<string>(cached.graph.nodes);
+      const edges = cached.graph.edges as DependencyEdge[];
+      const packageDependencies = new Map<string, Set<string>>();
+      const packageDependents = new Map<string, Set<string>>();
+      
+      // Reconstruct the Maps from serialized objects
+      for (const [pkg, deps] of Object.entries(cached.graph.packageDependencies as Record<string, string[]>)) {
+        packageDependencies.set(pkg, new Set(deps));
+      }
+      
+      for (const [pkg, deps] of Object.entries(cached.graph.packageDependents as Record<string, string[]>)) {
+        packageDependents.set(pkg, new Set(deps));
+      }
+      
+      return {
+        nodes,
+        edges,
+        packageDependencies,
+        packageDependents
+      };
+    } catch (error) {
+      logger.debug(`Failed to load cache from ${cacheFilePath}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Save dependency graph to cache file
+   */
+  private async saveGraphToCache(cacheFilePath: string, graph: DependencyGraph): Promise<void> {
+    try {
+      // Ensure cache directory exists
+      await fs.mkdir(dirname(cacheFilePath), { recursive: true });
+      
+      // Convert Maps to serializable objects
+      const packageDependenciesObj: Record<string, string[]> = {};
+      for (const [pkg, deps] of graph.packageDependencies) {
+        packageDependenciesObj[pkg] = Array.from(deps);
+      }
+      
+      const packageDependentsObj: Record<string, string[]> = {};
+      for (const [pkg, deps] of graph.packageDependents) {
+        packageDependentsObj[pkg] = Array.from(deps);
+      }
+      
+      const cacheData = {
+        version: '1.0',
+        timestamp: new Date().toISOString(),
+        graph: {
+          nodes: Array.from(graph.nodes),
+          edges: graph.edges,
+          packageDependencies: packageDependenciesObj,
+          packageDependents: packageDependentsObj
+        }
+      };
+      
+      await fs.writeFile(cacheFilePath, JSON.stringify(cacheData, null, 2));
+    } catch (error) {
+      throw new Error(`Failed to save cache to ${cacheFilePath}: ${error}`);
+    }
   }
 }

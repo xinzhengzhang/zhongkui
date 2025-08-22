@@ -127,16 +127,27 @@ bazel build --profile=profile.json //src/...
 bazel run //src:zhongkui -- analyze -p profile.json -t "//src/..." -r /path/to/repo
 
 # Method 2: Run and analyze in one step (recommended)
-bazel run //src:zhongkui -- run-and-analyze -c "bazel build //src/... --config=remote"
+bazel run //src:zhongkui -- run-and-analyze -c "bazel build //src/..."
+
+# Method 3: Predict impact before building (fastest, no actual build)
+bazel run //src:zhongkui -- predict-impact -c "bazel build //src/..."
 
 # Advanced examples
 bazel run //src:zhongkui -- run-and-analyze \
   -c "bazel test //app:* --config=ci --keep_going" \
   --keep-profile \
   --base-branch origin/main
+
+# Static impact analysis for pre-build planning
+bazel run //src:zhongkui -- predict-impact \
+  -c "bazel build //app:*" \
+  --base-branch origin/main \
+  --verbose
 ```
 
-**Output**: Generates `report-{profileId}-{timestamp}.json` and `report-{profileId}-{timestamp}.md` files for consumption by external data products.
+**Output**: 
+- **analyze & run-and-analyze**: Generate `report-{profileId}-{timestamp}.json` and `report-{profileId}-{timestamp}.md` files with actual timing data
+- **predict-impact**: Generate `impact-prediction-{profileId}-{timestamp}.json` and `impact-prediction-{profileId}-{timestamp}.md` files with static dependency analysis
 
 ### Key Implementation Notes
 

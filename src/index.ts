@@ -161,8 +161,208 @@ function parseBazelCommand(bazelCommand: string) {
 }
 
 /**
- * Execute analyze command with extracted options
+ * Execute predict-impact analysis - static analysis of potentially affected actions
  */
+async function executePredictImpact(options: {
+  command: string;
+  repoRoot: string;
+  baseBranch: string;
+  outputDir: string;
+  cacheMode: string;
+  verbose?: boolean;
+}) {
+  logger.info(`Predicting impact for command: ${options.command}`);
+  
+  // Parse the Bazel command to extract targets
+  const parsed = parseBazelCommand(options.command);
+  logger.info(`Parsed command - Binary: ${parsed.bazelBinary}, Targets: ${parsed.targets}`);
+  
+  // Resolve output directory relative to repo root if it's a relative path
+  const absoluteOutputDir = isAbsolute(options.outputDir) 
+    ? options.outputDir 
+    : resolve(options.repoRoot, options.outputDir);
+  
+  // Analyze file changes
+  const diffAnalyzer = new DiffAnalyzer(options.repoRoot);
+  const fileChanges = await diffAnalyzer.analyzeChanges(options.repoRoot, options.baseBranch);
+  
+  logger.info(`Found ${fileChanges.length} changed files across ${new Set(fileChanges.map(fc => fc.package)).size} packages`);
+  
+  // Extract changed packages
+  const changedPackages = [...new Set(fileChanges.map(fc => fc.package))];
+  
+  // Use BazelQuery directly to build dependency graph
+  const bazelQuery = new (await import('./bazel/query')).BazelQuery(options.repoRoot);
+  const dependencyGraph = await bazelQuery.buildDependencyGraph(parsed.targets, {
+    bazelBinary: parsed.bazelBinary,
+    startupOpts: parsed.startupOpts,
+    commandOpts: parsed.commandOpts,
+    cacheMode: options.cacheMode as 'force' | 'auto'
+  });
+  
+  // Find potentially affected packages using dependency graph
+  const potentiallyAffectedPackages = new Map<string, { reason: string; contributingPackages: string[] }>();
+  
+  // Add directly changed packages
+  for (const pkg of changedPackages) {
+    potentiallyAffectedPackages.set(pkg, {
+      reason: 'direct change',
+      contributingPackages: []
+    });
+  }
+  
+  // Find packages that transitively depend on changed packages
+  const maxDepth = 3;
+  for (const changedPkg of changedPackages) {
+    const transitiveDependents = bazelQuery.getTransitiveDependentsFromGraph(
+      [changedPkg], 
+      dependencyGraph, 
+      maxDepth
+    );
+    
+    const dependents = transitiveDependents.get(changedPkg) || new Set();
+    for (const dependentPkg of dependents) {
+      if (!potentiallyAffectedPackages.has(dependentPkg)) {
+        potentiallyAffectedPackages.set(dependentPkg, {
+          reason: 'transitive dependency',
+          contributingPackages: [changedPkg]
+        });
+      } else {
+        // Add to contributing packages if it's already there due to multiple changed packages
+        const existing = potentiallyAffectedPackages.get(dependentPkg)!;
+        if (!existing.contributingPackages.includes(changedPkg)) {
+          existing.contributingPackages.push(changedPkg);
+        }
+      }
+    }
+  }
+  
+  // Generate prediction report
+  const timestamp = new Date().toISOString();
+  const profileId = `predict_${Date.now()}`;
+  
+  const predictionReport = {
+    type: 'impact-prediction',
+    profileId,
+    timestamp,
+    command: options.command,
+    parsedCommand: parsed,
+    baseBranch: options.baseBranch,
+    summary: {
+      totalChangedFiles: fileChanges.length,
+      totalChangedPackages: changedPackages.length,
+      totalPotentiallyAffectedPackages: potentiallyAffectedPackages.size,
+      analysisScope: parsed.targets
+    },
+    fileChanges,
+    potentiallyAffectedPackages: Array.from(potentiallyAffectedPackages.entries()).map(([packagePath, info]) => ({
+      packagePath,
+      reason: info.reason,
+      contributingPackages: info.contributingPackages
+    })),
+    recommendations: [
+      `${potentiallyAffectedPackages.size} packages may be affected by changes`,
+      fileChanges.length > 10 ? 'Consider using more targeted builds with specific target patterns' : 'Change scope appears manageable',
+      'Run the actual build with profiling to get precise timing data'
+    ]
+  };
+  
+  // Write JSON report
+  const jsonFileName = join(absoluteOutputDir, `impact-prediction-${profileId}-${Date.now()}.json`);
+  await import('fs/promises').then(fs => fs.mkdir(absoluteOutputDir, { recursive: true }));
+  await import('fs/promises').then(fs => fs.writeFile(jsonFileName, JSON.stringify(predictionReport, null, 2)));
+  
+  // Generate markdown report
+  const markdownReport = generatePredictionMarkdownReport(predictionReport, {
+    repoRoot: options.repoRoot,
+    baseBranch: options.baseBranch,
+    outputDir: options.outputDir,
+    cacheMode: options.cacheMode,
+    verbose: options.verbose
+  });
+  const mdFileName = join(absoluteOutputDir, `impact-prediction-${profileId}-${Date.now()}.md`);
+  await import('fs/promises').then(fs => fs.writeFile(mdFileName, markdownReport));
+  
+  // Display prediction results with highlighted colors
+  console.log(`\n${colors.bright}${colors.cyan}🔮 Impact prediction completed:${colors.reset}`);
+  console.log(`${colors.bright}${colors.green}   JSON: ${jsonFileName}${colors.reset}`);
+  console.log(`${colors.bright}${colors.green}   MD:   ${mdFileName}${colors.reset}`);
+  console.log(`\n${colors.bright}${colors.yellow}📊 Prediction Summary:${colors.reset}`);
+  console.log(`   Changed files: ${predictionReport.summary.totalChangedFiles}`);
+  console.log(`   Changed packages: ${predictionReport.summary.totalChangedPackages}`);
+  console.log(`   Potentially affected packages: ${predictionReport.summary.totalPotentiallyAffectedPackages}\n`);
+  
+  logger.info('Impact prediction completed successfully');
+}
+
+/**
+ * Generate markdown report for impact prediction
+ */
+function generatePredictionMarkdownReport(report: any, options: {
+  repoRoot: string;
+  baseBranch: string;
+  outputDir: string;
+  cacheMode: string;
+  verbose?: boolean;
+}): string {
+  let markdown = `# Build Impact Prediction Report
+
+**Profile ID:** ${report.profileId}
+**Generated:** ${report.timestamp}
+**Command:** \`${report.command}\`
+**Base Branch:** ${report.baseBranch}
+
+## Prediction Summary
+
+- **Changed Files:** ${report.summary.totalChangedFiles}
+- **Changed Packages:** ${report.summary.totalChangedPackages}
+- **Potentially Affected Packages:** ${report.summary.totalPotentiallyAffectedPackages}
+- **Analysis Scope:** \`${report.summary.analysisScope}\`
+
+## Changed Files
+
+| File | Change Type | Package |
+|------|-------------|---------|
+`;
+
+  report.fileChanges.forEach((fc: any) => {
+    markdown += `| \`${fc.path}\` | ${fc.changeType} | \`${fc.package}\` |\n`;
+  });
+
+  markdown += `\n## Potentially Affected Packages
+
+| Package | Reason | Contributing Changes |
+|---------|--------|---------------------|
+`;
+
+  report.potentiallyAffectedPackages.forEach((pkg: any) => {
+    const contributing = pkg.contributingPackages.length > 0 
+      ? pkg.contributingPackages.map((p: string) => `\`${p}\``).join(', ')
+      : 'Direct change';
+    markdown += `| \`${pkg.packagePath}\` | ${pkg.reason} | ${contributing} |\n`;
+  });
+
+  if (report.recommendations && report.recommendations.length > 0) {
+    markdown += `\n## Recommendations\n\n`;
+    report.recommendations.forEach((rec: string, index: number) => {
+      markdown += `${index + 1}. ${rec}\n`;
+    });
+  }
+
+  markdown += `\n## Next Steps
+
+1. **Review the potentially affected packages** to understand the scope of impact
+2. **Establish baseline performance** by running: \`${report.command}\`  
+3. **Make your code changes** based on the impact analysis above
+4. **Measure actual performance impact** by running: \`zhongkui run-and-analyze -c "${report.command}" -r "${options.repoRoot}" -b "${options.baseBranch}" -o "${options.outputDir}" --cache-mode "${options.cacheMode}"${options.verbose ? ' --verbose' : ''}\`
+5. **Compare results** to understand the real cost of your changes
+
+---
+*This is a static prediction based on dependency analysis. Run actual builds with profiling for precise timing data.*
+`;
+
+  return markdown;
+}
 async function executeAnalyze(options: {
   profile: string;
   targets: string;
@@ -239,7 +439,7 @@ program
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
   .option('--bazel-binary <path>', 'Path to bazel binary', 'bazel')
   .option('--startup-opts <opts>', 'Bazel startup options (e.g., "--host_jvm_args=-Xmx4g")')
-  .option('--command-opts <opts>', 'Bazel command options (e.g., "--config=remote")')
+  .option('--command-opts <opts>', 'Bazel command options (e.g., "--experimental_profile_include_target_label=true")')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--verbose', 'Enable verbose logging')
   .action(async (options) => {
@@ -257,7 +457,7 @@ program
 program
   .command('run-and-analyze')
   .description('Execute a Bazel command with profiling and automatically analyze the results')
-  .requiredOption('-c, --command <bazel-command>', 'Complete Bazel command to execute (e.g., "bazel build //src:app --config=remote")')
+  .requiredOption('-c, --command <bazel-command>', 'Complete Bazel command to execute (e.g., "bazel build //src:app")')
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
@@ -359,6 +559,28 @@ program
         }
       }
       
+      process.exit(1);
+    }
+  });
+
+program
+  .command('predict-impact')
+  .description('Predict which packages and actions might be affected by changes without running the build')
+  .requiredOption('-c, --command <bazel-command>', 'Complete Bazel command to analyze (e.g., "bazel build //src:app")')
+  .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
+  .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
+  .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
+  .option('--verbose', 'Enable verbose logging')
+  .action(async (options) => {
+    try {
+      if (options.verbose) {
+        enableVerbose();
+      }
+      
+      await executePredictImpact(options);
+    } catch (error) {
+      logger.error('Impact prediction failed:', error);
       process.exit(1);
     }
   });
