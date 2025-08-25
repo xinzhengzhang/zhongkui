@@ -113,7 +113,9 @@ function parseBazelCommand(bazelCommand: string) {
     
     // Check if this is a bazel command
     if (['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(arg)) {
-      break;
+      command = arg;  // Set the command
+      i++;  // Move to next argument
+      break;  // Exit startup options parsing
     }
     
     // If it starts with --, it's a startup option
@@ -133,35 +135,51 @@ function parseBazelCommand(bazelCommand: string) {
       }
       i++;
     } else {
-      // Not a startup option, must be the command or something unexpected
-      break;
+      // Not a startup option and not a command, warn and skip
+      logger.warn(`Unexpected argument before command: ${arg}`);
+      i++;
     }
   }
   
-  // Parse command (build, test, run, etc.)
-  if (i < parts.length) {
-    command = parts[i];
-    i++;
+  // If no command was found, assume 'build'
+  if (!command) {
+    command = 'build';
   }
   
   // Parse remaining arguments - separate targets from options
   while (i < parts.length) {
     const arg = parts[i];
+    
     if (arg.startsWith('--')) {
       // This is a command option
-      commandOpts.push(arg);
-      i++;
-      // Handle options with values (consume the next argument as the value)
-      if (i < parts.length && !parts[i].startsWith('--')) {
-        commandOpts[commandOpts.length - 1] += `=${parts[i]}`;
+      if (arg.includes('=')) {
+        // Option with value: --config=release
+        commandOpts.push(arg);
         i++;
+      } else {
+        // Option may have value in next arg, but be careful not to consume targets or other options
+        commandOpts.push(arg);
+        i++;
+        
+        // Check if next arg is a value for this option
+        if (i < parts.length && !parts[i].startsWith('--') && !parts[i].startsWith('//')) {
+          // Only consume the next argument if it looks like a value, not a target
+          // This is heuristic-based - if it contains special characters, likely a value
+          const nextArg = parts[i];
+          if (nextArg.includes('=') || nextArg.includes(':') || nextArg.includes('/') || 
+              /^[a-zA-Z0-9_-]+$/.test(nextArg)) {
+            commandOpts[commandOpts.length - 1] += `=${nextArg}`;
+            i++;
+          }
+        }
       }
     } else if (arg.startsWith('//') || (arg.startsWith('@') && arg.includes('//'))) {
-      // This is a Bazel target (more specific check to avoid option values)
+      // This is a Bazel target
       targets.push(arg);
       i++;
     } else {
       // Skip unknown arguments
+      logger.debug(`Skipping unknown argument: ${arg}`);
       i++;
     }
   }
@@ -385,16 +403,56 @@ function generatePredictionMarkdownReport(report: any, options: {
 }
 async function executeAnalyze(options: {
   profile: string;
-  targets: string;
+  command?: string;
+  targets?: string;
   repoRoot: string;
   baseBranch: string;
   outputDir: string;
-  bazelBinary: string;
+  bazelBinary?: string;
   startupOpts?: string;
   commandOpts?: string;
   cacheMode: string;
 }) {
-  logger.info(`Starting analysis for profile: ${options.profile}, targets: ${options.targets}`);
+  let actualTargets: string;
+  let actualBazelBinary: string;
+  let actualStartupOpts: string = '';
+  let actualCommandOpts: string = '';
+
+  // Parse command or use provided options
+  if (options.command) {
+    logger.info(`Parsing Bazel command: ${options.command}`);
+    const parsed = parseBazelCommand(options.command);
+    
+    actualTargets = parsed.targets;
+    actualBazelBinary = parsed.bazelBinary;
+    actualStartupOpts = parsed.startupOpts;
+    actualCommandOpts = parsed.commandOpts;
+    
+    // Override with explicit options if provided
+    if (options.targets) {
+      logger.info(`Overriding targets from command with explicit option: ${options.targets}`);
+      actualTargets = options.targets;
+    }
+    if (options.bazelBinary) {
+      actualBazelBinary = options.bazelBinary;
+    }
+    if (options.startupOpts) {
+      actualStartupOpts = options.startupOpts;
+    }
+    if (options.commandOpts) {
+      actualCommandOpts = options.commandOpts;
+    }
+    
+    logger.info(`Using parsed values - Targets: ${actualTargets}, Binary: ${actualBazelBinary}`);
+  } else {
+    // Use provided options directly (backward compatibility)
+    actualTargets = options.targets!;
+    actualBazelBinary = options.bazelBinary || 'bazel';
+    actualStartupOpts = options.startupOpts || '';
+    actualCommandOpts = options.commandOpts || '';
+  }
+
+  logger.info(`Starting analysis for profile: ${options.profile}, targets: ${actualTargets}`);
   
   // Resolve output directory relative to repo root if it's a relative path
   const absoluteOutputDir = isAbsolute(options.outputDir) 
@@ -418,11 +476,11 @@ async function executeAnalyze(options: {
   const analysis = await dependencyAnalyzer.analyze(
     allActions, 
     fileChanges, 
-    options.targets, 
+    actualTargets, 
     {
-      bazelBinary: options.bazelBinary,
-      startupOpts: options.startupOpts,
-      commandOpts: options.commandOpts,
+      bazelBinary: actualBazelBinary,
+      startupOpts: actualStartupOpts,
+      commandOpts: actualCommandOpts,
       cacheMode: options.cacheMode as 'force' | 'auto'
     }
   );
@@ -453,7 +511,8 @@ program
   .command('analyze')
   .description('Analyze build performance from a Bazel profile')
   .requiredOption('-p, --profile <path>', 'Path to Bazel profile JSON file')
-  .requiredOption('-t, --targets <pattern>', 'Build targets pattern (e.g., "//src/..." or "//app:*")')
+  .option('-c, --command <bazel-command>', 'Complete Bazel command used to generate the profile (auto-extracts targets and options)')
+  .option('-t, --targets <pattern>', 'Build targets pattern (e.g., "//src/..." or "//app:*") - required if --command is not provided')
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
@@ -462,11 +521,29 @@ program
   .option('--command-opts <opts>', 'Bazel command options (e.g., "--experimental_profile_include_target_label=true")')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--verbose', 'Enable verbose logging')
+  .addHelpText('after', `
+Examples:
+  # Method 1: Use complete command (recommended - auto-extracts everything)
+  zhongkui analyze -p profile.json -c "bazel build //app:* --config=release"
+  zhongkui analyze -p profile.json -c "./bazel-wrapper build --output_base=/tmp/bazel //src/..."
+
+  # Method 2: Manual specification (legacy mode)
+  zhongkui analyze -p profile.json -t "//app:*" --bazel-binary ./bazel-wrapper
+  
+  # With custom options
+  zhongkui analyze -p profile.json -c "bazel build //app:*" -b origin/develop --verbose`)
   .action(async (options) => {
     try {
       if (options.verbose) {
         enableVerbose();
       }
+      
+      // Validate required parameters based on usage mode
+      if (!options.command && !options.targets) {
+        logger.error('Either --command or --targets is required');
+        process.exit(1);
+      }
+      
       await executeAnalyze(options);
     } catch (error) {
       logger.error('Analysis failed:', error);
