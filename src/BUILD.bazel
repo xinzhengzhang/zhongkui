@@ -1,27 +1,23 @@
-# TypeScript configuration
+# Pure SWC transpilation without ts_project
 load("@aspect_rules_js//js:defs.bzl", "js_library", "js_binary")
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_swc//swc:defs.bzl", "swc")
 
-# TypeScript project compilation
-ts_project(
-    name = "zhongkui_ts",
+# SWC transpilation of TypeScript files
+swc(
+    name = "zhongkui_js",
     srcs = glob(["**/*.ts"]),
-    declaration = True,
-    declaration_map = True,
-    resolve_json_module = True,
-    source_map = True,
-    transpiler = "tsc",
-    tsconfig = "//:tsconfig",
-    deps = [
+    swcrc = "//:.swcrc",
+)
+
+# Main CLI binary - self-contained with all dependencies
+js_binary(
+    name = "zhongkui",
+    data = [
+        ":zhongkui_js",
         "//:node_modules/@types/node",
         "//:node_modules/commander", 
         "//:node_modules/winston",
     ],
-)
-
-# Main CLI binary
-js_binary(
-    name = "zhongkui",
-    data = [":zhongkui_ts"],
     entry_point = "index.js",
+    visibility = ["//visibility:public"],
 )
