@@ -10,6 +10,7 @@ export interface BazelAction {
   package?: string; // Resolved package path
   startTime?: number;
   endTime?: number;
+  contributingPackagesCount?: number; // Number of changed packages that caused this action
 }
 
 export interface FileChange {

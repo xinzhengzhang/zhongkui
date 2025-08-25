@@ -93,6 +93,8 @@ export class SimpleDependencyAnalyzer {
   private async resolveActionPackages(actions: BazelAction[]): Promise<BazelAction[]> {
     const resolvedActions: BazelAction[] = [];
     
+    logger.info(`\n=== RESOLVING ACTION PACKAGES ===`);
+    
     for (const action of actions) {
       try {
         const packagePath = await this.bazelQuery.mapActionToPackage(action.target);
@@ -110,6 +112,19 @@ export class SimpleDependencyAnalyzer {
       }
     }
     
+    // Debug: 显示一些关键的actions和它们的packages
+    const externalRepoActions = resolvedActions.filter(a => a.target.startsWith('@@'));
+    logger.info(`Found ${externalRepoActions.length} external repo actions out of ${resolvedActions.length} total actions`);
+    
+    if (externalRepoActions.length > 0) {
+      logger.info(`Sample external repo actions:`);
+      externalRepoActions.slice(0, 5).forEach(action => {
+        logger.info(`  Target: ${action.target} -> Package: ${action.package}`);
+      });
+    }
+    
+    logger.info(`===================================\n`);
+    
     return resolvedActions;
   }
 
@@ -125,7 +140,8 @@ export class SimpleDependencyAnalyzer {
   ): Promise<Array<BazelAction & { contributingPackages: string[] }>> {
     logger.info(`\n=== Attribution Analysis ===`);
     logger.info(`Changed packages: ${Array.from(changedPackages).join(', ')}`);
-    logger.info(`Analyzing ${actions.length} actions for attribution...\n`);
+    logger.info(`Analyzing ${actions.length} actions for attribution...`);
+    logger.info(`Dependency graph contains ${dependencyGraph.nodes.size} nodes\n`);
     
     // 优化：预计算依赖关系映射（支持缓存）
     const targetDependencyCache = await this.precomputeDependencyMappingsWithCache(
@@ -133,6 +149,27 @@ export class SimpleDependencyAnalyzer {
       dependencyGraph,
       bazelOptions?.cacheMode || 'auto'
     );
+    
+    // 新增：处理不在dependency graph中但在profile中的actions（例如外部仓库的actions）
+    logger.info(`\n=== Processing Actions Not in Dependency Graph ===`);
+    let actionsNotInGraph = 0;
+    let directMatchesNotInGraph = 0;
+    
+    for (const action of actions) {
+      // 如果这个action的target不在dependency graph中，但它的package是changed package，直接添加映射
+      if (!dependencyGraph.nodes.has(action.target)) {
+        actionsNotInGraph++;
+        const actionPackage = this.extractPackageFromTarget(action.target);
+        if (actionPackage && changedPackages.has(actionPackage)) {
+          targetDependencyCache.set(action.target, [actionPackage]);
+          directMatchesNotInGraph++;
+        }
+      }
+    }
+    
+    logger.info(`Found ${actionsNotInGraph} actions not in dependency graph`);
+    logger.info(`Of these, ${directMatchesNotInGraph} belong to changed packages`);
+    logger.info(`Updated cache with ${targetDependencyCache.size} total mappings\n`);
     
     return actions.map((action, index) => {
       const contributingPackages = this.findContributingPackagesFast(action, changedPackages, targetDependencyCache);
@@ -143,7 +180,12 @@ export class SimpleDependencyAnalyzer {
         const isDirectAttribution = actionPackage && changedPackages.has(actionPackage);
         const attributionType = isDirectAttribution ? 'Direct' : 'Transitive';
         
-        logger.info(`✓ Action ${action.target} (${action.duration}ms) <- [${contributingPackages.join(', ')}] (${attributionType})`);
+        // 特别调试根包归因的问题
+        if (contributingPackages.includes('.') || contributingPackages.includes('')) {
+          logger.info(`🚨 ROOT ATTRIBUTION: Action ${action.target} (package: ${actionPackage}) <- [${contributingPackages.join(', ')}] (${attributionType})`);
+        } else {
+          logger.info(`✓ Action ${action.target} (${action.duration}ms) <- [${contributingPackages.join(', ')}] (${attributionType})`);
+        }
         
         if (contributingPackages.length > 1) {
           logger.info(`  └─ Duration will be split: ${Math.round(action.duration / contributingPackages.length)}ms each`);
@@ -209,6 +251,8 @@ export class SimpleDependencyAnalyzer {
   private generateCacheKey(changedPackages: Set<string>, dependencyGraph: DependencyGraph): string {
     // 基于变更包和依赖图的哈希
     const input = {
+      // 添加算法版本以确保缓存失效当算法改变时
+      algorithmVersion: 'v2.2-transitive-dependency-fix', // 更新版本号以失效旧缓存
       changedPackages: Array.from(changedPackages).sort(),
       dependencyGraphHash: this.hashDependencyGraph(dependencyGraph)
     };
@@ -417,6 +461,8 @@ export class SimpleDependencyAnalyzer {
     
     // 处理所有节点（不再过滤，因为传递依赖可能很复杂）
     let processedCount = 0;
+    let matchedDirectActions = 0; // 计数直接匹配的actions
+    
     for (const target of dependencyGraph.nodes) {
       const targetPackage = this.extractPackageFromTarget(target);
       const contributingPackages: string[] = [];
@@ -424,6 +470,7 @@ export class SimpleDependencyAnalyzer {
       // 情况1：target直接在changed package中
       if (targetPackage && changedPackages.has(targetPackage)) {
         contributingPackages.push(targetPackage);
+        matchedDirectActions++;
       }
       
       // 情况2：使用预建索引快速查找直接依赖
@@ -444,10 +491,14 @@ export class SimpleDependencyAnalyzer {
         }
       }
       
-      // 情况4：传递性依赖
-      if (contributingPackages.length === 0 && transitivelyAffectedTargets.has(target)) {
+      // 情况4：传递性依赖（应该与其他情况合并，而不是互斥）
+      if (transitivelyAffectedTargets.has(target)) {
         const transitiveContributions = transitivelyAffectedTargets.get(target)!;
-        contributingPackages.push(...transitiveContributions);
+        for (const contrib of transitiveContributions) {
+          if (!contributingPackages.includes(contrib)) {
+            contributingPackages.push(contrib);
+          }
+        }
       }
       
       if (contributingPackages.length > 0) {
@@ -463,6 +514,7 @@ export class SimpleDependencyAnalyzer {
     
     const totalTime = Date.now() - startTime;
     logger.info(`Optimized precomputation completed: ${targetDependencyCache.size} mappings in ${totalTime}ms`);
+    logger.info(`Direct package matches in dependency graph: ${matchedDirectActions}/${dependencyGraph.nodes.size} targets`);
     
     return targetDependencyCache;
   }
@@ -556,10 +608,14 @@ export class SimpleDependencyAnalyzer {
           }
         }
         
-        // 情况3：传递性依赖
-        if (contributingPackages.length === 0 && transitivelyAffectedTargets.has(target)) {
+        // 情况3：传递性依赖（应该与其他情况合并，而不是互斥）
+        if (transitivelyAffectedTargets.has(target)) {
           const transitiveContributions = transitivelyAffectedTargets.get(target)!;
-          contributingPackages.push(...transitiveContributions);
+          for (const contrib of transitiveContributions) {
+            if (!contributingPackages.includes(contrib)) {
+              contributingPackages.push(contrib);
+            }
+          }
         }
         
         if (contributingPackages.length > 0) {
@@ -743,12 +799,26 @@ export class SimpleDependencyAnalyzer {
       const { target, sourceChangedPackages } = queue.shift()!;
       
       if (visited.has(target)) {
-        // 如果已经访问过，合并source packages
+        // 如果已经访问过，检查是否有新的source packages需要合并
         const existing = result.get(target);
         if (existing) {
+          let hasNewPackages = false;
           for (const pkg of sourceChangedPackages) {
             if (!existing.includes(pkg)) {
               existing.push(pkg);
+              hasNewPackages = true;
+            }
+          }
+          // 如果有新的packages，需要重新传播到依赖者
+          if (hasNewPackages) {
+            const dependents = reverseDependencies.get(target);
+            if (dependents) {
+              for (const dependent of dependents) {
+                queue.push({
+                  target: dependent,
+                  sourceChangedPackages: new Set(existing)
+                });
+              }
             }
           }
         }
@@ -762,12 +832,10 @@ export class SimpleDependencyAnalyzer {
       const dependents = reverseDependencies.get(target);
       if (dependents) {
         for (const dependent of dependents) {
-          if (!visited.has(dependent)) {
-            queue.push({
-              target: dependent,
-              sourceChangedPackages: new Set(sourceChangedPackages)
-            });
-          }
+          queue.push({
+            target: dependent,
+            sourceChangedPackages: new Set(sourceChangedPackages)
+          });
         }
       }
       
@@ -866,13 +934,38 @@ export class SimpleDependencyAnalyzer {
   }
 
   /**
-   * 从 target 提取 package
+   * 从 target 提取 package (支持外部仓库格式)
    */
   private extractPackageFromTarget(target: string): string {
+    // Handle new Bazel 6+ external repo format: @@repo~//package:target
+    if (target.startsWith('@@')) {
+      const match = target.match(/^@@([^~+]+)(?:[~+].*)?\/\/([^:]*)/);
+      if (match) {
+        const [, repoName, packagePath] = match;
+        return `@${repoName}//${packagePath || ''}`;
+      }
+      // Fallback for unrecognized @@format
+      return target;
+    }
+    
+    // Handle legacy external repo format: @repo//package:target
+    if (target.startsWith('@')) {
+      const match = target.match(/^@([^/]+)\/\/([^:]*)/);
+      if (match) {
+        const [, repoName, packagePath] = match;
+        return `@${repoName}//${packagePath || ''}`;
+      }
+      // If no // found, return the whole external repo reference
+      return target;
+    }
+    
+    // Handle internal repo format: //package:target
     if (target.startsWith('//')) {
       const colonIndex = target.indexOf(':');
       return colonIndex > 0 ? target.slice(2, colonIndex) : target.slice(2);
     }
+    
+    // Default case - return as is
     return target;
   }
 
@@ -950,10 +1043,14 @@ if (!isMainThread && parentPort) {
       }
     }
     
-    // 情况4：传递性依赖
-    if (contributingPackages.length === 0 && transitiveTargetsMap.has(target)) {
+    // 情况4：传递性依赖（应该与其他情况合并，而不是互斥）
+    if (transitiveTargetsMap.has(target)) {
       const transitiveContributions = transitiveTargetsMap.get(target)!;
-      contributingPackages.push(...transitiveContributions);
+      for (const contrib of transitiveContributions) {
+        if (!contributingPackages.includes(contrib)) {
+          contributingPackages.push(contrib);
+        }
+      }
     }
     
     if (contributingPackages.length > 0) {

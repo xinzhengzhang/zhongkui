@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { ProfileAnalyzer } from './profile/analyzer';
-import { DiffAnalyzer } from './diff/analyzer';
+import { DiffAnalyzer, AdditionalRepo } from './diff/analyzer';
 import { SimpleDependencyAnalyzer } from './dependency/simple-analyzer';
 import { HotspotReporter } from './hotspot/reporter';
 import { logger, enableVerbose } from './utils/logger';
@@ -89,6 +89,9 @@ function executeCommandWithLog(command: string, args: string[], cwd: string, log
 
 /**
  * Parse a Bazel command to extract relevant options for analysis
+ * Supports two modes:
+ * 1. Separate: bazel --startup-opts command --command-opts targets
+ * 2. Combined: "bazel --startup-opts" command --command-opts targets
  */
 function parseBazelCommand(bazelCommand: string) {
   const parts = bazelCommand.trim().split(/\s+/);
@@ -101,24 +104,33 @@ function parseBazelCommand(bazelCommand: string) {
   
   let i = 0;
   
-  // Parse bazel binary (could be bazelisk, bazel, or a path)
-  if (parts[i] && (parts[i].includes('bazel') || parts[i].startsWith('./'))) {
+  // Parse bazel binary with potential startup options
+  if (parts[i] && (parts[i].includes('bazel') || parts[i].startsWith('./') || parts[i].startsWith('/'))) {
     bazelBinary = parts[i];
     i++;
   }
   
-  // Parse startup options (before the command)
-  while (i < parts.length) {
+  // Look ahead to find the command position
+  let commandIndex = -1;
+  for (let j = i; j < parts.length; j++) {
+    if (['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(parts[j])) {
+      commandIndex = j;
+      command = parts[j];
+      break;
+    }
+  }
+  
+  // If no command found, assume 'build'
+  if (commandIndex === -1) {
+    command = 'build';
+    commandIndex = parts.length; // Treat rest as targets/options
+  }
+  
+  // Decide parsing strategy - always use separate mode for clarity
+  // Parse startup options separately (before the command)
+  while (i < commandIndex) {
     const arg = parts[i];
     
-    // Check if this is a bazel command
-    if (['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(arg)) {
-      command = arg;  // Set the command
-      i++;  // Move to next argument
-      break;  // Exit startup options parsing
-    }
-    
-    // If it starts with --, it's a startup option
     if (arg.startsWith('--')) {
       if (arg.includes('=')) {
         // Option with value in same arg: --output_base=/tmp/path
@@ -127,7 +139,7 @@ function parseBazelCommand(bazelCommand: string) {
         // Option may have value in next arg: --output_base /tmp/path
         startupOpts.push(arg);
         // Check if next arg is a value (not starting with -- and not a command)
-        if (i + 1 < parts.length && !parts[i + 1].startsWith('--') && 
+        if (i + 1 < commandIndex && !parts[i + 1].startsWith('--') && 
             !['build', 'test', 'run', 'query', 'cquery', 'info', 'version'].includes(parts[i + 1])) {
           i++;
           startupOpts[startupOpts.length - 1] += `=${parts[i]}`;
@@ -141,12 +153,8 @@ function parseBazelCommand(bazelCommand: string) {
     }
   }
   
-  // If no command was found, assume 'build'
-  if (!command) {
-    command = 'build';
-  }
-  
-  // Parse remaining arguments - separate targets from options
+  // Parse remaining arguments after command - separate targets from options
+  i = commandIndex + 1;
   while (i < parts.length) {
     const arg = parts[i];
     
@@ -192,10 +200,49 @@ function parseBazelCommand(bazelCommand: string) {
     commandOpts: commandOpts.join(' ')
   };
   
-  // Debug logging to verify parsing
-  logger.info(`Parsed command: ${JSON.stringify(result, null, 2)}`);
+  // Debug logging to verify parsing - make it more visible
+  logger.info(`\n=== BAZEL COMMAND PARSING ===`);
+  logger.info(`Original command: ${bazelCommand}`);
+  logger.info(`Parsed components:`);
+  logger.info(`  - bazelBinary: "${result.bazelBinary}"`);
+  logger.info(`  - startupOpts: "${result.startupOpts}"`);
+  logger.info(`  - command: "${result.command}"`);
+  logger.info(`  - targets: "${result.targets}"`);
+  logger.info(`  - commandOpts: "${result.commandOpts}"`);
+  logger.info(`===============================\n`);
   
   return result;
+}
+
+/**
+ * Parse additional repository specification with optional repo names
+ * Supports formats:
+ * - "path" -> {path: "path", repoName: null}
+ * - "path:reponame" -> {path: "path", repoName: "reponame"}
+ */
+function parseAdditionalRepoSpec(spec: string): { path: string; repoName: string | null } {
+  const parts = spec.split(':');
+  if (parts.length === 2) {
+    return { path: parts[0].trim(), repoName: parts[1].trim() };
+  } else {
+    return { path: parts[0].trim(), repoName: null };
+  }
+}
+
+/**
+ * Resolve additional repository paths relative to the repo root
+ */
+function resolveAdditionalRepos(additionalReposString: string | undefined, repoRoot: string): Array<{ path: string; repoName: string | null }> {
+  if (!additionalReposString) return [];
+  
+  return additionalReposString.split(',').map((spec: string) => {
+    const parsed = parseAdditionalRepoSpec(spec);
+    const resolvedPath = isAbsolute(parsed.path) ? parsed.path : resolve(repoRoot, parsed.path);
+    return {
+      path: resolvedPath,
+      repoName: parsed.repoName
+    };
+  });
 }
 
 /**
@@ -207,6 +254,7 @@ async function executePredictImpact(options: {
   baseBranch: string;
   outputDir: string;
   cacheMode: string;
+  additionalRepos?: AdditionalRepo[];
   verbose?: boolean;
 }) {
   logger.info(`Predicting impact for command: ${options.command}`);
@@ -220,8 +268,11 @@ async function executePredictImpact(options: {
     ? options.outputDir 
     : resolve(options.repoRoot, options.outputDir);
   
-  // Analyze file changes
-  const diffAnalyzer = new DiffAnalyzer(options.repoRoot);
+  // Additional repos should already be resolved at this point
+  const resolvedAdditionalRepos = options.additionalRepos || [];
+  
+  // Analyze file changes in the main repository and additional repos
+  const diffAnalyzer = new DiffAnalyzer(options.repoRoot, resolvedAdditionalRepos);
   const fileChanges = await diffAnalyzer.analyzeChanges(options.repoRoot, options.baseBranch);
   
   logger.info(`Found ${fileChanges.length} changed files across ${new Set(fileChanges.map(fc => fc.package)).size} packages`);
@@ -412,6 +463,7 @@ async function executeAnalyze(options: {
   startupOpts?: string;
   commandOpts?: string;
   cacheMode: string;
+  additionalRepos?: AdditionalRepo[];
 }) {
   let actualTargets: string;
   let actualBazelBinary: string;
@@ -428,12 +480,14 @@ async function executeAnalyze(options: {
     actualStartupOpts = parsed.startupOpts;
     actualCommandOpts = parsed.commandOpts;
     
-    // Override with explicit options if provided
+    // Override with explicit options if provided (only if different from default)
     if (options.targets) {
       logger.info(`Overriding targets from command with explicit option: ${options.targets}`);
       actualTargets = options.targets;
     }
-    if (options.bazelBinary) {
+    // Only override bazel binary if explicitly provided (not the default value)
+    if (options.bazelBinary && options.bazelBinary !== 'bazel') {
+      logger.info(`Overriding bazel binary from command with explicit option: ${options.bazelBinary}`);
       actualBazelBinary = options.bazelBinary;
     }
     if (options.startupOpts) {
@@ -442,6 +496,10 @@ async function executeAnalyze(options: {
     if (options.commandOpts) {
       actualCommandOpts = options.commandOpts;
     }
+    
+    logger.info(`DEBUG: parsed.bazelBinary = "${parsed.bazelBinary}"`);
+    logger.info(`DEBUG: actualBazelBinary after assignment = "${actualBazelBinary}"`);
+    logger.info(`DEBUG: options.bazelBinary = "${options.bazelBinary || 'undefined'}"`);
     
     logger.info(`Using parsed values - Targets: ${actualTargets}, Binary: ${actualBazelBinary}`);
   } else {
@@ -467,8 +525,11 @@ async function executeAnalyze(options: {
   const metadata = await profileAnalyzer.getProfileMetadata(options.profile);
   logger.info(`Profile contains ${metadata.totalActions} total actions`);
   
-  // Analyze file changes
-  const diffAnalyzer = new DiffAnalyzer(options.repoRoot);
+  // Additional repos should already be resolved at this point
+  const resolvedAdditionalRepos = options.additionalRepos || [];
+  
+  // Analyze file changes in the main repository and additional repos
+  const diffAnalyzer = new DiffAnalyzer(options.repoRoot, resolvedAdditionalRepos);
   const fileChanges = await diffAnalyzer.analyzeChanges(options.repoRoot, options.baseBranch);
   
   // Simplified dependency analysis
@@ -516,6 +577,7 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame" (e.g., "srcs/kntr:kntr_module,../shared:shared_lib")')
   .option('--bazel-binary <path>', 'Path to bazel binary', 'bazel')
   .option('--startup-opts <opts>', 'Bazel startup options (e.g., "--host_jvm_args=-Xmx4g")')
   .option('--command-opts <opts>', 'Bazel command options (e.g., "--experimental_profile_include_target_label=true")')
@@ -530,13 +592,16 @@ Examples:
   # Method 2: Manual specification (legacy mode)
   zhongkui analyze -p profile.json -t "//app:*" --bazel-binary ./bazel-wrapper
   
-  # With custom options
-  zhongkui analyze -p profile.json -c "bazel build //app:*" -b origin/develop --verbose`)
+  # With custom options and additional repositories
+  zhongkui analyze -p profile.json -c "bazel build //app:*" -b origin/develop --additional-repos "srcs/kntr:kntr_module,../shared:shared_lib" --verbose`)
   .action(async (options) => {
     try {
       if (options.verbose) {
         enableVerbose();
       }
+      
+      // Parse and resolve additional repositories relative to repo-root
+      const additionalRepos = resolveAdditionalRepos(options.additionalRepos, options.repoRoot);
       
       // Validate required parameters based on usage mode
       if (!options.command && !options.targets) {
@@ -544,7 +609,10 @@ Examples:
         process.exit(1);
       }
       
-      await executeAnalyze(options);
+      await executeAnalyze({
+        ...options,
+        additionalRepos
+      });
     } catch (error) {
       logger.error('Analysis failed:', error);
       process.exit(1);
@@ -558,6 +626,7 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
   .option('--verbose', 'Enable verbose logging')
@@ -569,6 +638,9 @@ program
       if (options.verbose) {
         enableVerbose();
       }
+      
+      // Parse and resolve additional repositories relative to repo-root
+      const additionalRepos = resolveAdditionalRepos(options.additionalRepos, options.repoRoot);
       
       logger.info(`Executing Bazel command: ${options.command}`);
       
@@ -610,7 +682,8 @@ program
         bazelBinary: parsed.bazelBinary,
         startupOpts: parsed.startupOpts,
         commandOpts: parsed.commandOpts,
-        cacheMode: options.cacheMode as 'force' | 'auto'
+        cacheMode: options.cacheMode as 'force' | 'auto',
+        additionalRepos
       });
       
       // Clean up temporary files unless --keep-profile is specified
@@ -667,6 +740,7 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--verbose', 'Enable verbose logging')
   .action(async (options) => {
@@ -675,7 +749,13 @@ program
         enableVerbose();
       }
       
-      await executePredictImpact(options);
+      // Parse and resolve additional repositories relative to repo-root
+      const additionalRepos = resolveAdditionalRepos(options.additionalRepos, options.repoRoot);
+      
+      await executePredictImpact({
+        ...options,
+        additionalRepos
+      });
     } catch (error) {
       logger.error('Impact prediction failed:', error);
       process.exit(1);

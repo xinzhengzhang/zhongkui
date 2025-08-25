@@ -157,8 +157,10 @@ bazel run //src:zhongkui -- predict-impact \
 - **Pure Attribution Logic**: Build time is attributed only to packages that caused changes, ensuring total attributed time equals actual build time
 - **Scoped Dependency Analysis**: `bazel query rdeps()` commands are scoped to target patterns to avoid analyzing irrelevant parts of the monorepo
 - **Transitive Tracking**: Actions in dependent packages are tracked but not double-counted in time attribution
+- **External Repository Support**: Correctly handles Bazel 6+ Bzlmod external repository formats (`@@repo~//package`, `@@module~~extension~repo//package`)
+- **Shared Dependency Attribution**: When multiple changed packages contribute to an action, duration is split equally among them with proper tracking
 - **Package Detection**: Currently uses directory structure for package mapping; production implementation should parse BUILD files
-- **Shared Dependency Handling**: When multiple changed packages contribute to an action, duration is split equally among them
+- **Multi-Path Dependency Analysis**: Fixed transitive dependency algorithm to correctly identify all paths from changed packages to affected actions
 
 ## Future Implementation Areas
 

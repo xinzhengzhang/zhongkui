@@ -73,30 +73,58 @@ export class BazelQuery {
     }
   }
 
+  // Cache for file package mappings to avoid repeated queries
+  private filePackageCache = new Map<string, string>();
+
   /**
    * Find which package a file belongs to by finding the nearest BUILD file
+   * This method avoids expensive bazel query calls by using directory traversal
    */
   async getFilePackage(filePath: string): Promise<string> {
-    try {
-      // Use bazel query to find the package containing this file
-      const { stdout } = await execAsync(
-        `cd ${this.repoRoot} && bazel query --output=package "rdeps(//..., ${filePath}, 1)"`,
-        { timeout: 30000 }
-      );
-      
-      const packages = stdout.trim().split('\n').filter(p => p);
-      if (packages.length > 0) {
-        // Return the most specific (longest) package path
-        return packages.reduce((longest, current) => 
-          current.length > longest.length ? current : longest
-        );
-      }
-    } catch (error) {
-      logger.warn(`Bazel query failed for file ${filePath}, falling back to BUILD file search:`, error);
+    // Check cache first
+    if (this.filePackageCache.has(filePath)) {
+      return this.filePackageCache.get(filePath)!;
     }
 
-    // Fallback: search for BUILD files in directory hierarchy
-    return this.findNearestBuildFile(filePath);
+    // Use BUILD file search directly as it's more efficient
+    const packagePath = await this.findNearestBuildFile(filePath);
+    
+    // Cache the result
+    this.filePackageCache.set(filePath, packagePath);
+    
+    return packagePath;
+  }
+
+  /**
+   * Batch query multiple files to find their packages efficiently
+   * Only use this when you need bazel query accuracy for multiple files
+   */
+  async getFilePackagesBatch(filePaths: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    const uncachedFiles: string[] = [];
+    
+    // Check cache first
+    for (const filePath of filePaths) {
+      if (this.filePackageCache.has(filePath)) {
+        result.set(filePath, this.filePackageCache.get(filePath)!);
+      } else {
+        uncachedFiles.push(filePath);
+      }
+    }
+    
+    // If all files are cached, return early
+    if (uncachedFiles.length === 0) {
+      return result;
+    }
+    
+    // For uncached files, use BUILD file search which is more efficient
+    for (const filePath of uncachedFiles) {
+      const packagePath = await this.findNearestBuildFile(filePath);
+      result.set(filePath, packagePath);
+      this.filePackageCache.set(filePath, packagePath);
+    }
+    
+    return result;
   }
 
   /**
@@ -126,24 +154,29 @@ export class BazelQuery {
 
   /**
    * Map an action target to its owning package
+   * Supports multiple target formats:
+   * 1. Full labels like "//path/to/package:target"
+   * 2. Short labels like ":target" (relative to current package)
+   * 3. Legacy external targets like "@external_repo//path:target"
+   * 4. New Bazel 6+ external targets like "@@external_repo~//path:target"
    */
   async mapActionToPackage(actionTarget: string): Promise<string> {
-    // Handle different target formats:
-    // 1. Full labels like "//path/to/package:target"
-    // 2. Short labels like ":target" (relative to current package)
-    // 3. External targets like "@external_repo//path:target"
+    // Handle new Bazel 6+ external repo format first
+    if (actionTarget.startsWith('@@')) {
+      return this.extractPackageFromLabel(actionTarget);
+    }
     
+    // Handle internal repo format
     if (actionTarget.startsWith('//')) {
       return this.extractPackageFromLabel(actionTarget);
     }
     
+    // Handle legacy external repo format
     if (actionTarget.startsWith('@')) {
-      // External dependency - extract package after the //
-      const match = actionTarget.match(/@[^/]+\/\/([^:]+)/);
-      return match ? match[1] : actionTarget;
+      return this.extractPackageFromLabel(actionTarget);
     }
 
-    // Use bazel query for complex cases
+    // Use bazel query for complex cases (like relative targets)
     return this.getTargetPackage(actionTarget);
   }
 
@@ -183,6 +216,13 @@ export class BazelQuery {
       
       // Use specified bazel binary or default to 'bazel'
       const bazelBinary = bazelOptions?.bazelBinary || 'bazel';
+      
+      // Debug: 显示接收到的bazel选项
+      logger.info(`\n=== BAZEL QUERY OPTIONS ===`);
+      logger.info(`bazelBinary: "${bazelBinary}"`);
+      logger.info(`startupOpts: "${bazelOptions?.startupOpts || ''}"`);
+      logger.info(`commandOpts: "${bazelOptions?.commandOpts || ''}"`);
+      logger.info(`===========================\n`);
       
       // Add startup options if provided
       if (bazelOptions?.startupOpts) {
@@ -420,12 +460,56 @@ export class BazelQuery {
 
   /**
    * Extract package path from a Bazel label
+   * Supports multiple formats:
+   * - //path/to/package:target -> path/to/package
+   * - @external_repo//path:target -> @external_repo//path (legacy format)
+   * - @@external_repo~//path:target -> @external_repo//path (Bazel 6-7 format)
+   * - @@module~~ext~repo//path:target -> @module~~ext~repo//path (Bazel 6-7 Bzlmod format)
+   * - @@external_repo+//path:target -> @external_repo//path (Bazel 8+ format)
+   * - @@module++ext+repo//path:target -> @module++ext+repo//path (Bazel 8+ Bzlmod format)
    */
   private extractPackageFromLabel(label: string): string {
+    // Handle new Bazel 6+ external repo format: @@repo~//package:target
+    if (label.startsWith('@@')) {
+      // Handle Bzlmod format:
+      // Bazel 6-7: @@module~~extension~repo//package or @@repo~//package
+      // Bazel 8+:   @@module++extension+repo//package or @@repo+//package
+      const match = label.match(/^@@([^~+]+)(?:[~+].*)?\/\/([^:]*)/);
+      if (match) {
+        const [, repoName, packagePath] = match;
+        const result = `@${repoName}//${packagePath || ''}`;
+        logger.debug(`Converted Bazel 6+ external repo label: ${label} -> ${result}`);
+        return result;
+      }
+      // Fallback if pattern doesn't match
+      logger.warn(`Failed to parse Bazel 6+ external repo label: ${label}`);
+      return label;
+    }
+    
+    // Handle legacy external repo format: @repo//package:target
+    if (label.startsWith('@')) {
+      const match = label.match(/^@([^/]+)\/\/([^:]*)/);
+      if (match) {
+        const [, repoName, packagePath] = match;
+        const result = `@${repoName}//${packagePath || ''}`;
+        logger.debug(`Parsed legacy external repo label: ${label} -> ${result}`);
+        return result;
+      }
+      // If no // found, return the whole external repo reference
+      logger.debug(`External repo label without package: ${label}`);
+      return label;
+    }
+    
+    // Handle internal repo format: //package:target
     if (label.startsWith('//')) {
       const colonIndex = label.indexOf(':');
-      return colonIndex > 0 ? label.slice(2, colonIndex) : label.slice(2);
+      const result = colonIndex > 0 ? label.slice(2, colonIndex) : label.slice(2);
+      logger.debug(`Parsed internal repo label: ${label} -> ${result}`);
+      return result;
     }
+    
+    // Default case
+    logger.debug(`Unknown label format: ${label}`);
     return label;
   }
 
@@ -456,18 +540,62 @@ export class BazelQuery {
   }
 
   /**
-   * Find the nearest BUILD file for a given file path
+   * Find the nearest BUILD file for a given file path, considering sub Bazel modules
    */
   private async findNearestBuildFile(filePath: string): Promise<string> {
     const parts = filePath.split('/');
+    let moduleRoot = this.repoRoot;
     
+    // First, find the Bazel module root for this file
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const currentPath = parts.slice(0, i + 1).join('/');
+      const fullPath = `${this.repoRoot}/${currentPath}`;
+      
+      // Check if this directory contains WORKSPACE, WORKSPACE.bzl, or MODULE.bazel
+      try {
+        const workspacePath = `${fullPath}/WORKSPACE`;
+        const workspaceBzlPath = `${fullPath}/WORKSPACE.bzl`;
+        const moduleBazelPath = `${fullPath}/MODULE.bazel`;
+        
+        await execAsync(`test -f "${workspacePath}" || test -f "${workspaceBzlPath}" || test -f "${moduleBazelPath}"`);
+        
+        // Found a Bazel module root, update our search base
+        moduleRoot = fullPath;
+        
+        // Recalculate parts relative to this module root
+        const relativePath = filePath.startsWith(currentPath + '/') 
+          ? filePath.slice(currentPath.length + 1)
+          : filePath;
+        const relativeParts = relativePath.split('/');
+        
+        // Now search for BUILD files starting from this module root
+        for (let j = relativeParts.length - 1; j >= 0; j--) {
+          const packagePath = relativeParts.slice(0, j + 1).join('/');
+          const buildFilePath = `${moduleRoot}/${packagePath}/BUILD`;
+          const buildBazelPath = `${moduleRoot}/${packagePath}/BUILD.bazel`;
+          
+          try {
+            await execAsync(`test -f "${buildFilePath}" || test -f "${buildBazelPath}"`);
+            return packagePath;
+          } catch {
+            // Continue searching parent directories
+          }
+        }
+        
+        // If no BUILD file found in this module, return root package relative to module
+        return '.';
+      } catch {
+        // No Bazel module marker found, continue searching
+      }
+    }
+    
+    // Fallback: search in the original repo root without module consideration
     for (let i = parts.length - 1; i >= 0; i--) {
       const packagePath = parts.slice(0, i + 1).join('/');
       const buildFilePath = `${this.repoRoot}/${packagePath}/BUILD`;
       const buildBazelPath = `${this.repoRoot}/${packagePath}/BUILD.bazel`;
       
       try {
-        // Check if BUILD file exists
         await execAsync(`test -f "${buildFilePath}" || test -f "${buildBazelPath}"`);
         return packagePath;
       } catch {
@@ -503,6 +631,8 @@ export class BazelQuery {
    */
   private generateGraphCacheKey(targetScope: string, bazelOptions?: { bazelBinary?: string; startupOpts?: string; commandOpts?: string }): string {
     const data = {
+      // 添加算法版本以确保缓存失效当算法改变时
+      algorithmVersion: 'v2.1-external-repo-support',
       targetScope,
       bazelBinary: bazelOptions?.bazelBinary || 'bazel',
       startupOpts: bazelOptions?.startupOpts || '',

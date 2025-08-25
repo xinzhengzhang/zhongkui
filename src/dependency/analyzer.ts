@@ -313,14 +313,17 @@ export class DependencyAnalyzer {
         // Direct impact: full attribution to the package
         hotspot.totalDuration += action.duration;
         hotspot.actionCount += 1;
-        hotspot.directActions.push(action);
+        // For direct actions, contributing packages count is 1 (itself)
+        const directAction = { ...action, contributingPackagesCount: 1 };
+        hotspot.directActions.push(directAction);
       } else {
         // Transitive impact: attribute full duration only to changed packages that caused this action
         const contributingChangedPackages = await this.findContributingPackages(action, changedPackages);
         
         if (contributingChangedPackages.length > 0) {
           // Record this action as transitive for the executing package (but no time attribution)
-          hotspot.transitiveActions.push(action);
+          const transitiveAction = { ...action, contributingPackagesCount: contributingChangedPackages.length };
+          hotspot.transitiveActions.push(transitiveAction);
           contributingChangedPackages.forEach(pkg => hotspot.contributingPackages.add(pkg));
           
           // Attribute full duration divided among contributing changed packages
@@ -331,7 +334,9 @@ export class DependencyAnalyzer {
             if (contributingHotspot) {
               contributingHotspot.totalDuration += attributionWeight;
               contributingHotspot.actionCount += 1 / contributingChangedPackages.length;
-              contributingHotspot.transitiveActions.push(action);
+              // For actions attributed to contributing packages, store the count
+              const attributedAction = { ...action, contributingPackagesCount: contributingChangedPackages.length };
+              contributingHotspot.transitiveActions.push(attributedAction);
             }
           }
         }

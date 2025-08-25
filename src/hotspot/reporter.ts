@@ -77,6 +77,13 @@ export class HotspotReporter {
   }
 
   /**
+   * Format package path for display, handling empty root package
+   */
+  private formatPackageForDisplay(packagePath: string): string {
+    return (packagePath === '' || packagePath === '.') ? '(root)' : packagePath;
+  }
+
+  /**
    * Generate optimization recommendations
    */
   private generateRecommendations(hotspots: PackageHotspot[]): string[] {
@@ -143,7 +150,7 @@ export class HotspotReporter {
 
     hotspots.slice(0, 10).forEach((hotspot: PackageHotspot, index: number) => {
       const percentage = (hotspot.totalDuration / summary.totalDuration * 100).toFixed(2);
-      markdown += `| ${index + 1} | \`${hotspot.packagePath}\` | ${(hotspot.totalDuration / 1000).toFixed(2)} | ${hotspot.actionCount} | ${(hotspot.averageDuration / 1000).toFixed(2)} | ${percentage}% |\n`;
+      markdown += `| ${index + 1} | \`${this.formatPackageForDisplay(hotspot.packagePath)}\` | ${(hotspot.totalDuration / 1000).toFixed(2)} | ${hotspot.actionCount} | ${(hotspot.averageDuration / 1000).toFixed(2)} | ${percentage}% |\n`;
     });
 
     if (recommendations.length > 0) {
@@ -180,25 +187,39 @@ export class HotspotReporter {
       markdown += `\n*No direct actions found in changed packages.*\n`;
     } else {
       changedPackageHotspots.forEach((hotspot: PackageHotspot) => {
-        markdown += `\n### Package: \`${hotspot.packagePath}\`\n\n`;
+        markdown += `\n### Package: \`${this.formatPackageForDisplay(hotspot.packagePath)}\`\n\n`;
         
-        // Combine direct and transitive actions, then sort by duration
+        // Combine direct and transitive actions, then sort by proximity to changed packages
         const allActions = [...hotspot.directActions, ...hotspot.transitiveActions];
         const sortedActions = allActions
-          .sort((a, b) => b.duration - a.duration)
-          .slice(0, 30); // Top 30
+          .sort((a, b) => {
+            // Priority 1: Direct actions first
+            const aIsDirect = hotspot.directActions.includes(a) ? 0 : 1;
+            const bIsDirect = hotspot.directActions.includes(b) ? 0 : 1;
+            if (aIsDirect !== bIsDirect) return aIsDirect - bIsDirect;
+            
+            // Priority 2: Fewer contributing packages (closer to changed packages)
+            const aContributing = (a as any).contributingPackages?.length || a.contributingPackagesCount || 1;
+            const bContributing = (b as any).contributingPackages?.length || b.contributingPackagesCount || 1;
+            if (aContributing !== bContributing) return aContributing - bContributing;
+            
+            // Priority 3: Higher duration as tiebreaker
+            return b.duration - a.duration;
+          })
+          .slice(0, 200); // Top 200
         
         if (sortedActions.length === 0) {
           markdown += `*No actions found for this package.*\n`;
         } else {
-          markdown += `**Top ${Math.min(sortedActions.length, 30)} Actions by Duration:**\n\n`;
-          markdown += `| Rank | Target | Mnemonic | Duration (s) | Type |\n`;
-          markdown += `|------|--------|----------|--------------|------|\n`;
+          markdown += `**Top ${Math.min(sortedActions.length, 200)} Actions by Proximity to Changed Packages:**\n\n`;
+          markdown += `| Rank | Target | Mnemonic | Duration (s) | Contributing Packages | Type |\n`;
+          markdown += `|------|--------|----------|--------------|----------------------|------|\n`;
           
           sortedActions.forEach((action, index) => {
             const isDirect = hotspot.directActions.includes(action);
             const actionType = isDirect ? 'Direct' : 'Transitive';
-            markdown += `| ${index + 1} | \`${action.target}\` | ${action.mnemonic} | ${(action.duration / 1000).toFixed(3)} | ${actionType} |\n`;
+            const contributingCount = (action as any).contributingPackages?.length || action.contributingPackagesCount || 1;
+            markdown += `| ${index + 1} | \`${action.target}\` | ${action.mnemonic} | ${(action.duration / 1000).toFixed(3)} | ${contributingCount} | ${actionType} |\n`;
           });
           
           const directCount = hotspot.directActions.length;
