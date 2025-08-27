@@ -283,6 +283,7 @@ export class ProfileAnalyzer {
     totalDuration: number;
     buildTime: number;
     profileVersion?: string;
+    invocationId?: string;
   }> {
     const profileData = await this.loadProfileData(profilePath);
     const actions = this.extractActionsFromProfile(profileData);
@@ -297,11 +298,61 @@ export class ProfileAnalyzer {
     const buildEnd = Math.max(...endTimes);
     const buildTime = buildEnd - buildStart;
 
+    // Extract invocation ID from profile metadata
+    const invocationId = this.extractInvocationId(profileData);
+
     return {
       totalActions: actions.length,
       totalDuration,
       buildTime,
-      profileVersion: profileData.otherData?.version
+      profileVersion: profileData.otherData?.version,
+      invocationId
     };
+  }
+  
+  /**
+   * Extract invocation ID from profile data
+   */
+  private extractInvocationId(profileData: ProfileData): string | undefined {
+    // Method 1: Look for build_id in otherData (most reliable)
+    if (profileData.otherData?.build_id) {
+      return profileData.otherData.build_id;
+    }
+    
+    // Method 2: Look in otherData for other potential IDs
+    if (profileData.otherData?.invocationId) {
+      return profileData.otherData.invocationId;
+    }
+    
+    // Method 3: Look in metadata events
+    const metadataEvents = profileData.traceEvents.filter(e => 
+      e.name && (e.name.includes('InvocationPolicy') || e.name.includes('invocation'))
+    );
+    
+    for (const event of metadataEvents) {
+      if (event.args?.invocationId) {
+        return event.args.invocationId;
+      }
+    }
+    
+    // Method 4: Look for command line events that might contain build request ID
+    const cmdEvents = profileData.traceEvents.filter(e => 
+      e.name && e.name.includes('command') && e.args
+    );
+    
+    for (const event of cmdEvents) {
+      if (event.args?.buildRequestId || event.args?.requestId) {
+        return event.args.buildRequestId || event.args.requestId;
+      }
+    }
+    
+    // Method 5: Generate one from profile characteristics if not found
+    // Use profile creation time or first action timestamp
+    if (profileData.traceEvents.length > 0) {
+      const firstEvent = profileData.traceEvents[0];
+      return `profile_${Math.floor(firstEvent.ts / 1000000)}`; // Convert to seconds and use as ID
+    }
+    
+    return undefined;
   }
 }

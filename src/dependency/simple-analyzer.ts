@@ -79,7 +79,7 @@ export class SimpleDependencyAnalyzer {
     const packageHotspots = this.calculatePackageStats(attributions, changedPackages);
 
     return {
-      profileId: '',
+      invocationId: undefined,
       fileChanges,
       impactedActions: attributions.filter(a => a.contributingPackages.length > 0),
       packageHotspots,

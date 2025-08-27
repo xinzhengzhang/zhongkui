@@ -11,6 +11,8 @@ export interface BazelAction {
   startTime?: number;
   endTime?: number;
   contributingPackagesCount?: number; // Number of changed packages that caused this action
+  contributingPackages?: string[]; // List of changed packages that caused this action
+  transitiveDepth?: number; // How many hops from changed packages
 }
 
 export interface FileChange {
@@ -28,10 +30,20 @@ export interface PackageHotspot {
   directActions: BazelAction[]; // Actions directly in this package (time attributed here)
   transitiveActions: BazelAction[]; // Actions affected by this package's changes (time attributed to changed packages)
   contributingPackages: string[]; // Changed packages that caused transitive actions
+  // Time breakdown for changed packages
+  actualCompilationTime: number; // Real time spent compiling this changed package
+  transitiveCompilationTime: number; // Time spent on dependencies due to changes
+  attributionBreakdown: {
+    [changedPackage: string]: {
+      directTime: number; // Time from direct actions
+      transitiveTime: number; // Time from transitive actions caused by this package
+      actionCount: number; // Number of actions attributed to this package
+    };
+  };
 }
 
 export interface BuildAnalysis {
-  profileId: string; // Changed from invocationId to profileId
+  invocationId?: string; // Bazel invocation ID for correlation
   fileChanges: FileChange[];
   impactedActions: BazelAction[];
   packageHotspots: PackageHotspot[];

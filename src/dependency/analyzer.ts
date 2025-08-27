@@ -44,7 +44,7 @@ export class DependencyAnalyzer {
     const packageHotspots = await this.calculatePackageHotspots(impactedActions, fileChanges, packageDependencyGraph, targetScope);
 
     return {
-      profileId: '', // Will be set by caller
+      invocationId: undefined,
       fileChanges,
       impactedActions,
       packageHotspots,

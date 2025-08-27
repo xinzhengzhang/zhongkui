@@ -547,7 +547,7 @@ async function executeAnalyze(options: {
   );
   
   // Set analysis metadata
-  analysis.profileId = `profile_${Date.now()}`;
+  analysis.invocationId = metadata.invocationId;
   
   // Generate report using absolute output directory
   const reporter = new HotspotReporter();

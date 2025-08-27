@@ -17,21 +17,22 @@ export class HotspotReporter {
     await this.ensureDirectoryExists(outputDir);
 
     const report = {
-      profileId: analysis.profileId,
+      invocationId: analysis.invocationId,
       timestamp: new Date().toISOString(),
       summary: this.generateSummary(analysis),
+      changedPackagesAnalysis: this.generateChangedPackagesAnalysis(analysis),
       hotspots: analysis.packageHotspots,
       fileChanges: analysis.fileChanges,
       impactedActions: analysis.impactedActions.length,
       recommendations: this.generateRecommendations(analysis.packageHotspots)
     };
 
-    const fileName = join(outputDir, `report-${analysis.profileId}-${Date.now()}.json`);
+    const fileName = join(outputDir, `report-${analysis.invocationId || Date.now()}-${Date.now()}.json`);
     await writeFile(fileName, JSON.stringify(report, null, 2));
     
     // Also generate human-readable report
     const humanReport = this.generateHumanReadableReport(report, analysis);
-    const humanFileName = join(outputDir, `report-${analysis.profileId}-${Date.now()}.md`);
+    const humanFileName = join(outputDir, `report-${analysis.invocationId || Date.now()}-${Date.now()}.md`);
     await writeFile(humanFileName, humanReport);
 
     logger.info(`Reports generated: ${fileName}, ${humanFileName}`);
@@ -52,6 +53,65 @@ export class HotspotReporter {
       // Directory might already exist, which is fine
       logger.debug(`Directory creation result for ${outputDir}:`, error);
     }
+  }
+
+  /**
+   * Generate analysis specifically for changed packages
+   */
+  private generateChangedPackagesAnalysis(analysis: BuildAnalysis) {
+    const changedPackages = [...new Set(analysis.fileChanges.map(fc => fc.package))];
+    const changedPackageHotspots = analysis.packageHotspots.filter(h => 
+      changedPackages.includes(h.packagePath)
+    );
+    
+    const totalActualTime = changedPackageHotspots.reduce(
+      (sum, h) => sum + (h.actualCompilationTime || h.totalDuration), 0
+    );
+    
+    const totalTransitiveTime = changedPackageHotspots.reduce(
+      (sum, h) => sum + (h.transitiveCompilationTime || 0), 0
+    );
+    
+    return {
+      changedPackages: changedPackages.length,
+      totalActualCompilationTime: totalActualTime,
+      totalTransitiveCompilationTime: totalTransitiveTime,
+      packageBreakdown: changedPackageHotspots.map(h => ({
+        package: h.packagePath,
+        actualTime: h.actualCompilationTime || h.totalDuration,
+        transitiveTime: h.transitiveCompilationTime || 0,
+        directActions: h.directActions.length,
+        transitiveActions: h.transitiveActions.length,
+        attributionBreakdown: h.attributionBreakdown || {},
+        contributingToOthers: this.findTransitiveDependencies(h.packagePath, analysis)
+      }))
+    };
+  }
+  
+  /**
+   * Find which packages this changed package contributes to transitively
+   */
+  private findTransitiveDependencies(changedPackage: string, analysis: BuildAnalysis): Array<{package: string, actionCount: number, totalTime: number}> {
+    const contributions: {[pkg: string]: {actionCount: number, totalTime: number}} = {};
+    
+    analysis.packageHotspots.forEach(hotspot => {
+      if (hotspot.packagePath === changedPackage) return;
+      
+      hotspot.transitiveActions.forEach(action => {
+        if (action.contributingPackages?.includes(changedPackage)) {
+          if (!contributions[hotspot.packagePath]) {
+            contributions[hotspot.packagePath] = {actionCount: 0, totalTime: 0};
+          }
+          contributions[hotspot.packagePath].actionCount++;
+          contributions[hotspot.packagePath].totalTime += action.duration / (action.contributingPackagesCount || 1);
+        }
+      });
+    });
+    
+    return Object.entries(contributions)
+      .map(([pkg, data]) => ({package: pkg, ...data}))
+      .sort((a, b) => b.totalTime - a.totalTime)
+      .slice(0, 10);
   }
 
   /**
@@ -132,7 +192,7 @@ export class HotspotReporter {
     
     let markdown = `# Build Hotspot Analysis Report
 
-**Profile ID:** ${report.profileId}
+**Invocation ID:** ${report.invocationId || 'N/A'}
 **Generated:** ${report.timestamp}
 
 ## Summary
@@ -142,7 +202,26 @@ export class HotspotReporter {
 - **Average Package Duration:** ${(summary.averagePackageDuration / 1000).toFixed(2)}s
 - **Impacted Actions:** ${report.impactedActions}
 
-## Top 10 Package Hotspots
+## Changed Packages Analysis
+
+- **Changed Packages:** ${report.changedPackagesAnalysis.changedPackages}
+- **Actual Compilation Time:** ${(report.changedPackagesAnalysis.totalActualCompilationTime / 1000).toFixed(2)}s
+- **Transitive Compilation Time:** ${(report.changedPackagesAnalysis.totalTransitiveCompilationTime / 1000).toFixed(2)}s
+
+### Changed Package Breakdown
+
+| Package | Actual Time (s) | Transitive Time (s) | Direct Actions | Transitive Actions | Top Contributions |
+|---------|-----------------|--------------------|--------------|--------------------|-------------------|
+`;
+
+    report.changedPackagesAnalysis.packageBreakdown.forEach((pkg: any) => {
+      const topContributions = pkg.contributingToOthers.slice(0, 3)
+        .map((c: any) => `${c.package}(${(c.totalTime/1000).toFixed(1)}s)`)
+        .join(', ') || 'None';
+      markdown += `| \`${this.formatPackageForDisplay(pkg.package)}\` | ${(pkg.actualTime / 1000).toFixed(2)} | ${(pkg.transitiveTime / 1000).toFixed(2)} | ${pkg.directActions} | ${pkg.transitiveActions} | ${topContributions} |\n`;
+    });
+
+    markdown += `\n## Top 10 Package Hotspots
 
 | Rank | Package | Duration (s) | Actions | Avg Duration (s) | % of Total |
 |------|---------|-------------|---------|------------------|------------|
