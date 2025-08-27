@@ -65,7 +65,7 @@ export class HotspotReporter {
     );
     
     const totalActualTime = changedPackageHotspots.reduce(
-      (sum, h) => sum + (h.actualCompilationTime || h.totalDuration), 0
+      (sum, h) => sum + (h.actualCompilationTime || h.directActions.reduce((s, a) => s + a.duration, 0)), 0
     );
     
     const totalTransitiveTime = changedPackageHotspots.reduce(
@@ -78,7 +78,7 @@ export class HotspotReporter {
       totalTransitiveCompilationTime: totalTransitiveTime,
       packageBreakdown: changedPackageHotspots.map(h => ({
         package: h.packagePath,
-        actualTime: h.actualCompilationTime || h.totalDuration,
+        actualTime: h.actualCompilationTime || h.directActions.reduce((sum, action) => sum + action.duration, 0),
         transitiveTime: h.transitiveCompilationTime || 0,
         directActions: h.directActions.length,
         transitiveActions: h.transitiveActions.length,

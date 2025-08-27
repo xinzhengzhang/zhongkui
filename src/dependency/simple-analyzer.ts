@@ -909,15 +909,29 @@ export class SimpleDependencyAnalyzer {
         // 使用实际actions数组的长度，而不是平分后的计数
         const actualActionCount = stats.actions.length;
         
+        const directActions = stats.actions.filter(a => a.package === pkg);
+        const transitiveActions = stats.actions.filter(a => a.package !== pkg);
+        
+        // Calculate time components correctly:
+        // - actualTime = direct actions time (actions directly in this package)
+        // - transitiveTime = transitive actions time (actions caused by this package's changes but executed elsewhere)
+        const directTime = directActions.reduce((sum, action) => sum + action.duration, 0);
+        const transitiveActionsTime = transitiveActions.reduce((sum, action) => sum + action.duration, 0);
+        const actualCompilationTime = directTime;
+        const transitiveCompilationTime = transitiveActionsTime;
+        
         hotspots.push({
           packagePath: pkg,
           totalDuration: Math.round(stats.totalDuration),
           actionCount: actualActionCount,  // 使用实际数量
           averageDuration: actualActionCount > 0 ? Math.round(stats.totalDuration / actualActionCount) : 0,
           impactedBuilds: 1,
-          directActions: stats.actions.filter(a => a.package === pkg),
-          transitiveActions: stats.actions.filter(a => a.package !== pkg),
-          contributingPackages: [pkg]
+          directActions,
+          transitiveActions,
+          contributingPackages: [pkg],
+          actualCompilationTime: Math.round(actualCompilationTime),
+          transitiveCompilationTime: Math.round(transitiveCompilationTime),
+          attributionBreakdown: {}
         });
       }
     }

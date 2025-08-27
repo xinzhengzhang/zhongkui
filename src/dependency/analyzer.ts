@@ -347,6 +347,21 @@ export class DependencyAnalyzer {
     const hotspots: PackageHotspot[] = [];
     for (const [packagePath, stats] of packageHotspots) {
       if (stats.totalDuration > 0) {
+        const isChangedPackage = changedPackages.has(packagePath);
+        
+        // Calculate separate time components
+        const directTime = stats.directActions.reduce((sum, action) => sum + action.duration, 0);
+        const transitiveActionsTime = stats.transitiveActions.reduce((sum, action) => sum + action.duration, 0);
+        
+        // For changed packages: 
+        // - actualTime = direct actions time (actions directly in this package)
+        // - transitiveTime = transitive actions time (actions caused by changes but executed in this package)
+        // For non-changed packages: 
+        // - actualTime = 0 (they don't have direct changes)
+        // - transitiveTime = all their transitive actions time (caused by changed packages)
+        const actualCompilationTime = isChangedPackage ? directTime : 0;
+        const transitiveCompilationTime = transitiveActionsTime;
+        
         hotspots.push({
           packagePath,
           totalDuration: Math.round(stats.totalDuration),
@@ -355,7 +370,10 @@ export class DependencyAnalyzer {
           impactedBuilds: 1,
           directActions: stats.directActions,
           transitiveActions: stats.transitiveActions,
-          contributingPackages: Array.from(stats.contributingPackages)
+          contributingPackages: Array.from(stats.contributingPackages),
+          actualCompilationTime: Math.round(actualCompilationTime),
+          transitiveCompilationTime: Math.round(transitiveCompilationTime),
+          attributionBreakdown: {} // TODO: Implement detailed attribution breakdown if needed
         });
       }
     }
