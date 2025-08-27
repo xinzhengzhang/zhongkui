@@ -1,6 +1,31 @@
 # Release Notes - 钟馗 (Zhongkui) 
 
+- v0.0.2
 - v0.0.1
+
+## 🔧 v0.0.2 - Bug Fixes & Improvements
+
+### 🐛 Fixed
+- **Time Calculation Logic**: Fixed incorrect time attribution in package hotspot analysis
+  - `actualTime` now correctly shows only direct actions time (actions executed directly in the package)
+  - `transitiveTime` now correctly shows transitive actions time (actions caused by package changes but executed elsewhere)
+  - Previously, `actualTime` incorrectly included both direct and transitive actions, while `transitiveTime` was always 0
+- **Report Consistency**: Fixed inconsistency between `changedPackagesAnalysis` and `hotspots` time calculations
+- **Analyzer Alignment**: Applied consistent time calculation logic across both `SimpleDependencyAnalyzer` and `DependencyAnalyzer`
+
+### 🔄 Changed  
+- **Time Attribution Semantics**: Clarified the meaning of time fields in reports:
+  - `actualTime`: Time spent on actions directly in this package due to changes
+  - `transitiveTime`: Time spent on actions caused by this package's changes but executed in other packages
+  - This provides clearer insight into where build time is actually being spent
+
+### 🛠 Technical Details
+- Updated `SimpleDependencyAnalyzer.calculatePackageStats()` with correct time separation logic
+- Updated `DependencyAnalyzer.calculatePackageHotspots()` with proper field initialization
+- Fixed `HotspotReporter.generateChangedPackagesAnalysis()` fallback calculations
+- All analyzers now consistently populate `actualCompilationTime` and `transitiveCompilationTime` fields
+
+**Impact**: Reports now accurately show the breakdown of build time, making it easier to identify optimization opportunities.
 
 ## 🎉 Initial Release
 
