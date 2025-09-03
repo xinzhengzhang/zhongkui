@@ -25,15 +25,20 @@ const colors = {
 /**
  * Execute a command with output redirected to a log file
  */
-function executeCommandWithLog(command: string, args: string[], cwd: string, logFilePath: string): Promise<void> {
+function executeCommandWithLog(command: string, args: string[], cwd: string, logFilePath: string, redirectStdio: boolean = false): Promise<void> {
   return new Promise((resolve, reject) => {
     logger.info(`Executing: ${command} ${args.join(' ')}`);
     
-    // Print colorful message about log file
-    console.log(`\n${colors.bright}${colors.cyan}📋 Bazel build output will be logged to:${colors.reset}`);
-    console.log(`${colors.bright}${colors.green}   ${logFilePath}${colors.reset}`);
-    console.log(`\n${colors.bright}${colors.yellow}💡 To monitor build progress in real-time, run:${colors.reset}`);
-    console.log(`${colors.bright}${colors.blue}   tail -f ${logFilePath}${colors.reset}\n`);
+    if (!redirectStdio) {
+      // Print colorful message about log file only when not redirecting to stdio
+      console.log(`\n${colors.bright}${colors.cyan}📋 Bazel build output will be logged to:${colors.reset}`);
+      console.log(`${colors.bright}${colors.green}   ${logFilePath}${colors.reset}`);
+      console.log(`\n${colors.bright}${colors.yellow}💡 To monitor build progress in real-time, run:${colors.reset}`);
+      console.log(`${colors.bright}${colors.blue}   tail -f ${logFilePath}${colors.reset}\n`);
+    } else {
+      console.log(`\n${colors.bright}${colors.cyan}🔄 Bazel build output will be shown in real-time${colors.reset}`);
+      console.log(`${colors.bright}${colors.green}📄 Build log will also be saved to: ${logFilePath}${colors.reset}\n`);
+    }
     
     // Create write streams for the log file
     const logStream = createWriteStream(logFilePath, { flags: 'w' });
@@ -43,9 +48,15 @@ function executeCommandWithLog(command: string, args: string[], cwd: string, log
       stdio: ['inherit', 'pipe', 'pipe']
     });
     
-    // Redirect stdout and stderr to log file
+    // Always write to log file
     child.stdout?.pipe(logStream);
     child.stderr?.pipe(logStream);
+    
+    // Additionally redirect to current stdio if requested
+    if (redirectStdio) {
+      child.stdout?.pipe(process.stdout);
+      child.stderr?.pipe(process.stderr);
+    }
     
     child.on('close', async (code) => {
       logStream.end();
@@ -630,6 +641,7 @@ program
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
   .option('--verbose', 'Enable verbose logging')
+  .option('--redirect-stdio', 'Redirect Bazel command output to current stdout/stderr in addition to log file')
   .action(async (options) => {
     let tempProfilePath: string | null = null;
     let logFilePath: string | null = null;
@@ -668,7 +680,7 @@ program
       profileArgs.push(...parsed.targets.split(/\s+/).filter(arg => arg));
       
       // Execute the Bazel command with profiling and log file output
-      await executeCommandWithLog(parsed.bazelBinary, profileArgs, options.repoRoot, logFilePath);
+      await executeCommandWithLog(parsed.bazelBinary, profileArgs, options.repoRoot, logFilePath, options.redirectStdio);
       
       logger.info(`Profile generated at: ${tempProfilePath}`);
       
