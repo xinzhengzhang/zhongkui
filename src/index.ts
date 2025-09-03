@@ -577,7 +577,7 @@ const program = new Command();
 program
   .name('zhongkui')
   .description('Analyze build hotspots in Bazel monorepos')
-  .version('1.0.0');
+  .version('0.0.3');
 
 program
   .command('analyze')

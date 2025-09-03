@@ -1,7 +1,42 @@
 # Release Notes - 钟馗 (Zhongkui) 
 
+- v0.0.3
 - v0.0.2
 - v0.0.1
+
+## 🚀 v0.0.3 - Enhanced CLI & Output Control
+
+### ✨ New Features
+- **Real-time Output Redirection**: New `--redirect-stdio` option for `run-and-analyze` command
+  - Enables real-time viewing of Bazel build output directly in terminal
+  - Maintains log file creation for later analysis
+  - Improved user experience for monitoring long builds
+- **Build Output Optimization**: Enhanced Bazel command execution with optimization flags
+  - `--curses=no`: Cleaner output without terminal control sequences
+  - `--color=yes`: Colored output for better readability
+  - `--noprogress_in_terminal_title`: Prevents terminal title pollution
+
+### 🔄 Changed  
+- **Dual Output Mode**: Build commands now support both real-time display and log file preservation
+- **Improved User Messaging**: Better feedback about output modes and log file locations
+- **Command Structure**: Optimization flags are properly positioned in Bazel command options
+
+### 🛠 Technical Details
+- Enhanced `executeCommandWithLog()` function with stdio redirection capability
+- Added proper stream piping for both stdout and stderr to current process
+- Maintained backward compatibility with existing log-only behavior
+- Correct parameter positioning in Bazel command construction
+
+### 💡 Usage Examples
+```bash
+# Real-time output with log file backup
+zhongkui run-and-analyze --redirect-stdio -c "bazel build //app:*"
+
+# Traditional log-only mode (default)
+zhongkui run-and-analyze -c "bazel build //app:*"
+```
+
+**Impact**: Users can now monitor build progress in real-time while still maintaining comprehensive log files for analysis.
 
 ## 🔧 v0.0.2 - Bug Fixes & Improvements
 
