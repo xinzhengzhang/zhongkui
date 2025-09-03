@@ -677,6 +677,8 @@ program
       if (parsed.commandOpts) {
         profileArgs.push(...parsed.commandOpts.split(/\s+/).filter(arg => arg));
       }
+      // Add build optimization flags for better output
+      profileArgs.push('--curses=no', '--color=yes', '--noprogress_in_terminal_title');
       profileArgs.push(...parsed.targets.split(/\s+/).filter(arg => arg));
       
       // Execute the Bazel command with profiling and log file output
