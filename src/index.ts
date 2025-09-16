@@ -9,6 +9,7 @@ import { mkdtemp, rm, mkdir } from 'fs/promises';
 import { join, resolve, isAbsolute, dirname } from 'path';
 import { tmpdir } from 'os';
 import { createWriteStream } from 'fs';
+import { IgnoreManager } from './utils/ignore';
 
 /**
  * ANSI color codes for terminal output
@@ -475,6 +476,8 @@ async function executeAnalyze(options: {
   commandOpts?: string;
   cacheMode: string;
   additionalRepos?: AdditionalRepo[];
+  excludePackages?: string;
+  ignoreFile?: string;
 }) {
   let actualTargets: string;
   let actualBazelBinary: string;
@@ -541,7 +544,45 @@ async function executeAnalyze(options: {
   
   // Analyze file changes in the main repository and additional repos
   const diffAnalyzer = new DiffAnalyzer(options.repoRoot, resolvedAdditionalRepos);
-  const fileChanges = await diffAnalyzer.analyzeChanges(options.repoRoot, options.baseBranch);
+  const rawFileChanges = await diffAnalyzer.analyzeChanges(options.repoRoot, options.baseBranch);
+  
+  // Initialize ignore manager and load ignore patterns
+  const ignoreManager = new IgnoreManager(options.repoRoot, options.ignoreFile);
+  await ignoreManager.loadIgnorePatterns();
+  
+  // Apply both ignore file patterns and exclude packages parameter
+  let fileChanges = rawFileChanges;
+  
+  // First apply ignore file patterns
+  const { filtered: ignoredFiltered, excluded: ignoredExcluded } = ignoreManager.filterFileChanges(rawFileChanges);
+  fileChanges = ignoredFiltered;
+  
+  if (ignoredExcluded.length > 0) {
+    const ignoredPackages = new Set(ignoredExcluded.map(fc => fc.package));
+    logger.info(`Ignore file (${ignoreManager.getIgnoreFilePath() || '.zhongkuiignore'}) excluded ${ignoredExcluded.length} file changes from ${ignoredPackages.size} packages`);
+  }
+  
+  // Then apply --exclude-packages parameter (if provided)
+  if (options.excludePackages) {
+    const excludedPackagesSet = new Set(
+      options.excludePackages.split(',').map(pkg => pkg.trim()).filter(pkg => pkg)
+    );
+    
+    const beforeExclude = fileChanges.length;
+    const beforePackages = new Set(fileChanges.map(fc => fc.package));
+    
+    fileChanges = fileChanges.filter(fc => !excludedPackagesSet.has(fc.package));
+    
+    const afterExclude = fileChanges.length;
+    const afterPackages = new Set(fileChanges.map(fc => fc.package));
+    const excludedByParam = Array.from(beforePackages).filter(pkg => !afterPackages.has(pkg));
+    
+    if (excludedByParam.length > 0) {
+      logger.info(`CLI parameter --exclude-packages excluded additional ${beforeExclude - afterExclude} file changes from ${excludedByParam.length} packages: ${excludedByParam.join(', ')}`);
+    }
+  }
+  
+  logger.info(`Final result: ${fileChanges.length} file changes in ${new Set(fileChanges.map(fc => fc.package)).size} packages after applying all filters`);
   
   // Simplified dependency analysis
   const dependencyAnalyzer = new SimpleDependencyAnalyzer(options.repoRoot);
@@ -589,6 +630,8 @@ program
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame" (e.g., "srcs/kntr:kntr_module,../shared:shared_lib")')
+  .option('--exclude-packages <packages>', 'Comma-separated list of packages to exclude from attribution analysis (e.g., "genfiles,build-metadata")')
+  .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
   .option('--bazel-binary <path>', 'Path to bazel binary', 'bazel')
   .option('--startup-opts <opts>', 'Bazel startup options (e.g., "--host_jvm_args=-Xmx4g")')
   .option('--command-opts <opts>', 'Bazel command options (e.g., "--experimental_profile_include_target_label=true")')
@@ -622,7 +665,9 @@ Examples:
       
       await executeAnalyze({
         ...options,
-        additionalRepos
+        additionalRepos,
+        excludePackages: options.excludePackages,
+        ignoreFile: options.ignoreFile
       });
     } catch (error) {
       logger.error('Analysis failed:', error);
@@ -639,6 +684,8 @@ program
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
   .option('--profile-path <path>', 'Custom path for the generated profile file (default: temporary file)')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
+  .option('--exclude-packages <packages>', 'Comma-separated list of packages to exclude from attribution analysis (e.g., "genfiles,build-metadata")')
+  .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
   .option('--verbose', 'Enable verbose logging')
@@ -711,7 +758,9 @@ program
         startupOpts: parsed.startupOpts,
         commandOpts: parsed.commandOpts,
         cacheMode: options.cacheMode as 'force' | 'auto',
-        additionalRepos
+        additionalRepos,
+        excludePackages: options.excludePackages,
+        ignoreFile: options.ignoreFile
       });
       
       // Clean up temporary files unless --keep-profile is specified
@@ -772,6 +821,8 @@ program
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
+  .option('--exclude-packages <packages>', 'Comma-separated list of packages to exclude from attribution analysis (e.g., "genfiles,build-metadata")')
+  .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--verbose', 'Enable verbose logging')
   .action(async (options) => {

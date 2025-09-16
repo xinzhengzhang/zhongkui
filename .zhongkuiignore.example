@@ -1,0 +1,21 @@
+# .zhongkuiignore
+# This file specifies Bazel packages to exclude from build attribution analysis
+# Similar to .gitignore, supports comments and empty lines
+
+# Ignore build metadata and generated files
+genfiles
+//genfiles  # Both formats supported
+build-metadata
+
+# Ignore test-only packages
+test_data
+//test/data/*
+
+# Ignore external dependencies that shouldn't affect attribution
+external/*
+@external_repo//build/tools
+
+# Example with wildcard patterns
+*/generated/*
+*_generated
+bazel-*
