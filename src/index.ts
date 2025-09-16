@@ -5,8 +5,8 @@ import { SimpleDependencyAnalyzer } from './dependency/simple-analyzer';
 import { HotspotReporter } from './hotspot/reporter';
 import { logger, enableVerbose } from './utils/logger';
 import { spawn } from 'child_process';
-import { mkdtemp, rm } from 'fs/promises';
-import { join, resolve, isAbsolute } from 'path';
+import { mkdtemp, rm, mkdir } from 'fs/promises';
+import { join, resolve, isAbsolute, dirname } from 'path';
 import { tmpdir } from 'os';
 import { createWriteStream } from 'fs';
 
@@ -637,14 +637,17 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
+  .option('--profile-path <path>', 'Custom path for the generated profile file (default: temporary file)')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
   .option('--verbose', 'Enable verbose logging')
   .option('--redirect-stdio', 'Redirect Bazel command output to current stdout/stderr in addition to log file')
   .action(async (options) => {
-    let tempProfilePath: string | null = null;
-    let logFilePath: string | null = null;
+    let profilePath: string;
+    let logFilePath: string;
+    let isCustomProfile = false; // Track if using custom profile path
+    const tempDir = await mkdtemp(join(tmpdir(), 'zhongkui-profile-'));
     
     try {
       if (options.verbose) {
@@ -660,9 +663,20 @@ program
       const parsed = parseBazelCommand(options.command);
       logger.info(`Parsed command - Binary: ${parsed.bazelBinary}, Targets: ${parsed.targets}`);
       
-      // Create temporary profile file
-      const tempDir = await mkdtemp(join(tmpdir(), 'zhongkui-profile-'));
-      tempProfilePath = join(tempDir, 'profile.json');
+      if (options.profilePath) {
+        // Use custom profile path
+        profilePath = resolve(options.profilePath);
+        isCustomProfile = true;
+        logger.info(`Using custom profile path: ${profilePath}`);
+        
+        // Ensure the directory exists
+        const profileDir = dirname(profilePath);
+        await mkdir(profileDir, { recursive: true });
+      } else {
+        // Create temporary profile file
+        profilePath = join(tempDir, 'profile.json');
+        logger.info(`Using temporary profile path: ${profilePath}`);
+      }
       
       // Create log file path
       logFilePath = join(tempDir, 'bazel-build.log');
@@ -673,7 +687,7 @@ program
         profileArgs.push(...parsed.startupOpts.split(/\s+/).filter(arg => arg));
       }
       profileArgs.push(parsed.command);
-      profileArgs.push(`--profile=${tempProfilePath}`);
+      profileArgs.push(`--profile=${profilePath}`);
       if (parsed.commandOpts) {
         profileArgs.push(...parsed.commandOpts.split(/\s+/).filter(arg => arg));
       }
@@ -684,11 +698,11 @@ program
       // Execute the Bazel command with profiling and log file output
       await executeCommandWithLog(parsed.bazelBinary, profileArgs, options.repoRoot, logFilePath, options.redirectStdio);
       
-      logger.info(`Profile generated at: ${tempProfilePath}`);
+      logger.info(`Profile generated at: ${profilePath}`);
       
       // Now analyze the generated profile
       await executeAnalyze({
-        profile: tempProfilePath,
+        profile: profilePath,
         targets: parsed.targets,
         repoRoot: options.repoRoot,
         baseBranch: options.baseBranch,
@@ -701,40 +715,43 @@ program
       });
       
       // Clean up temporary files unless --keep-profile is specified
-      if (!options.keepProfile && tempProfilePath) {
+      if (!options.keepProfile && !isCustomProfile && profilePath) {
         logger.info('Cleaning up temporary profile and log files');
-        await rm(tempProfilePath, { force: true });
+        await rm(profilePath, { force: true });
         if (logFilePath) {
           await rm(logFilePath, { force: true });
         }
         // Only remove the temp directory, not recursively (to avoid deleting report files)
         try {
-          await rm(join(tempProfilePath, '..'), { force: true });
+          await rm(join(profilePath, '..'), { force: true });
         } catch (error) {
           // Ignore error if directory is not empty (contains other files)
           logger.debug('Temp directory cleanup skipped (may contain other files)');
         }
-      } else if (options.keepProfile) {
+      } else if (options.keepProfile || isCustomProfile) {
         console.log(`${colors.bright}${colors.cyan}📁 Files kept:${colors.reset}`);
-        console.log(`${colors.bright}${colors.green}   Profile: ${tempProfilePath}${colors.reset}`);
+        console.log(`${colors.bright}${colors.green}   Profile: ${profilePath}${colors.reset}`);
         if (logFilePath) {
           console.log(`${colors.bright}${colors.green}   Log:     ${logFilePath}${colors.reset}`);
+        }
+        if (isCustomProfile) {
+          console.log(`${colors.bright}${colors.yellow}   Note: Using custom profile path (not cleaned up automatically)${colors.reset}`);
         }
       }
       
     } catch (error) {
       logger.error('Run and analyze failed:', error);
       
-      // Clean up on error unless --keep-profile is specified
-      if (!options.keepProfile && tempProfilePath) {
+      // Clean up on error unless --keep-profile is specified or using custom profile
+      if (!options.keepProfile && !isCustomProfile) {
         try {
-          await rm(tempProfilePath, { force: true });
+          await rm(profilePath, { force: true });
           if (logFilePath) {
             await rm(logFilePath, { force: true });
           }
           // Only remove the temp directory, not recursively
           try {
-            await rm(join(tempProfilePath, '..'), { force: true });
+            await rm(tempDir, { force: true });
           } catch (cleanupError) {
             // Ignore error if directory is not empty
           }
