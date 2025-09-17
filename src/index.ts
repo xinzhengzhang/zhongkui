@@ -682,7 +682,7 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
-  .option('--profile-path <path>', 'Custom path for the generated profile file (default: temporary file)')
+  .option('-p, --profile <path>', 'Custom path for the generated profile file (default: temporary file)')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
   .option('--exclude-packages <packages>', 'Comma-separated list of packages to exclude from attribution analysis (e.g., "genfiles,build-metadata")')
   .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
@@ -710,9 +710,9 @@ program
       const parsed = parseBazelCommand(options.command);
       logger.info(`Parsed command - Binary: ${parsed.bazelBinary}, Targets: ${parsed.targets}`);
       
-      if (options.profilePath) {
-        // Use custom profile path
-        profilePath = resolve(options.profilePath);
+      if (options.profile) {
+        // Use custom profile path - resolve relative to repo root (original CLI directory)
+        profilePath = resolve(options.repoRoot, options.profile);
         isCustomProfile = true;
         logger.info(`Using custom profile path: ${profilePath}`);
         
@@ -772,7 +772,7 @@ program
         }
         // Only remove the temp directory, not recursively (to avoid deleting report files)
         try {
-          await rm(join(profilePath, '..'), { force: true });
+          await rm(tempDir, { force: true });
         } catch (error) {
           // Ignore error if directory is not empty (contains other files)
           logger.debug('Temp directory cleanup skipped (may contain other files)');
