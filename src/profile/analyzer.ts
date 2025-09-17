@@ -54,38 +54,47 @@ export class ProfileAnalyzer {
 
   /**
    * Extract action information from profile trace events
+   * Uses a two-tier approach:
+   * 1. 'action processing' events provide target info and act as parent events
+   * 2. 'local action execution' and 'complete action execution' provide actual timing data
    */
   private extractActionsFromProfile(profileData: ProfileData): BazelAction[] {
     const actions: BazelAction[] = [];
     
-    // Bazel profile events we're interested in:
-    // - Categories that represent actual action executions
-    // - Events with "ph": "X" are complete events with duration
-    const actionCategories = [
-      'action processing',
-      'complete action execution',
-      'local action execution',
-      'action processing'
-    ];
-    
-    const actionEvents = profileData.traceEvents.filter(event => 
-      actionCategories.includes(event.cat) && 
+    // Step 1: Extract parent events for target information
+    const parentEvents = profileData.traceEvents.filter(event => 
+      event.cat === 'action processing' && 
       event.ph === 'X' && 
       event.dur !== undefined
     );
-
-    for (const event of actionEvents) {
+    
+    // Step 2: Extract child events for actual timing
+    const childCategories = ['local action execution', 'complete action execution'];
+    const childEvents = profileData.traceEvents.filter(event => 
+      childCategories.includes(event.cat) && 
+      event.ph === 'X' && 
+      event.dur !== undefined
+    );
+    
+    logger.info(`Found ${parentEvents.length} parent events (action processing) and ${childEvents.length} child events (execution)`);
+    
+    // Step 3: Build parent-child relationships
+    const parentChildMap = this.buildParentChildMap(parentEvents, childEvents);
+    
+    // Step 4: Create BazelAction objects from child events
+    for (const childEvent of childEvents) {
       try {
-        const action = this.parseActionEvent(event);
+        const parentEvent = parentChildMap.get(childEvent);
+        const action = this.parseActionEventWithParent(childEvent, parentEvent);
         if (action) {
           actions.push(action);
         }
       } catch (error) {
-        logger.warn(`Failed to parse action event:`, error);
+        logger.warn(`Failed to parse child action event:`, error);
       }
     }
 
-    logger.info(`Extracted ${actions.length} actions from profile`);
+    logger.info(`Extracted ${actions.length} fine-grained actions from profile`);
     
     // Debug: log all unique targets/packages from profile
     const allTargets = [...new Set(actions.map(a => a.target))];
@@ -94,6 +103,142 @@ export class ProfileAnalyzer {
     logger.info(`Profile contains packages: ${allPackages.join(', ')}`);
     
     return actions;
+  }
+
+  /**
+   * Build mapping from child events to their parent events
+   * A parent contains a child if:
+   * - parent.ts <= child.ts
+   * - parent.ts + parent.dur >= child.ts + child.dur  
+   * - parent.tid == child.tid
+   */
+  private buildParentChildMap(parentEvents: ProfileEvent[], childEvents: ProfileEvent[]): Map<ProfileEvent, ProfileEvent | null> {
+    const parentChildMap = new Map<ProfileEvent, ProfileEvent | null>();
+    
+    for (const childEvent of childEvents) {
+      let bestParent: ProfileEvent | null = null;
+      let smallestDuration = Infinity;
+      
+      // Find the smallest parent that contains this child event
+      for (const parentEvent of parentEvents) {
+        if (this.isParentContainsChild(parentEvent, childEvent)) {
+          // If multiple parents contain the child, choose the one with smallest duration (most specific)
+          if (parentEvent.dur! < smallestDuration) {
+            bestParent = parentEvent;
+            smallestDuration = parentEvent.dur!;
+          }
+        }
+      }
+      
+      parentChildMap.set(childEvent, bestParent);
+      
+      if (!bestParent) {
+        logger.debug(`No parent found for child event: ${childEvent.name} (${childEvent.cat})`);
+      }
+    }
+    
+    const childrenWithParents = Array.from(parentChildMap.values()).filter(p => p !== null).length;
+    logger.info(`Successfully mapped ${childrenWithParents}/${childEvents.length} child events to parent events`);
+    
+    return parentChildMap;
+  }
+
+  /**
+   * Check if parent event contains child event based on timing and thread
+   */
+  private isParentContainsChild(parent: ProfileEvent, child: ProfileEvent): boolean {
+    // Must be on same thread
+    if (parent.tid !== child.tid) {
+      return false;
+    }
+    
+    const parentStart = parent.ts;
+    const parentEnd = parent.ts + (parent.dur || 0);
+    const childStart = child.ts;
+    const childEnd = child.ts + (child.dur || 0);
+    
+    // Parent must completely contain child
+    return parentStart <= childStart && parentEnd >= childEnd;
+  }
+
+  /**
+   * Parse a child action event using parent event for target information
+   */
+  private parseActionEventWithParent(childEvent: ProfileEvent, parentEvent: ProfileEvent | null): BazelAction | null {
+    // Try to get target from parent first (most reliable), then fall back to child
+    const target = this.extractTargetFromEventWithFallback(parentEvent, childEvent);
+    if (!target) {
+      return null;
+    }
+
+    // Use child event's timing data (this is what we want for attribution)
+    const duration = Math.round((childEvent.dur || 0) / 1000);
+    const startTime = Math.round(childEvent.ts / 1000);
+    
+    // Extract inputs and outputs from both parent and child
+    const inputs: string[] = [];
+    const outputs: string[] = [];
+    
+    // Prefer parent event's args for inputs/outputs (more complete)
+    const argsToUse = parentEvent?.args || childEvent.args;
+    if (argsToUse) {
+      if (argsToUse.inputs) {
+        inputs.push(...this.parseFileList(argsToUse.inputs));
+      }
+      if (argsToUse.outputs) {
+        outputs.push(...this.parseFileList(argsToUse.outputs));
+      }
+    }
+
+    // Generate unique ID that includes both parent and child info
+    const parentInfo = parentEvent ? `_p${Math.round(parentEvent.ts / 1000)}` : '';
+    const id = `${target}_${startTime}${parentInfo}`;
+
+    return {
+      id,
+      target,
+      mnemonic: this.extractMnemonicWithFallback(parentEvent, childEvent),
+      duration, // This is from child event - the actual execution time we care about
+      startTime,
+      endTime: startTime + duration,
+      inputs,
+      outputs,
+      // Additional metadata to track the source
+      category: childEvent.cat,
+      parentCategory: parentEvent?.cat
+    };
+  }
+
+  /**
+   * Extract target with fallback from parent to child event
+   */
+  private extractTargetFromEventWithFallback(parentEvent: ProfileEvent | null, childEvent: ProfileEvent): string | null {
+    // Try parent first (action processing events have reliable target info)
+    if (parentEvent) {
+      const parentTarget = this.extractTargetFromEvent(parentEvent);
+      if (parentTarget) {
+        return parentTarget;
+      }
+    }
+    
+    // Fall back to child event
+    return this.extractTargetFromEvent(childEvent);
+  }
+
+  /**
+   * Extract mnemonic with fallback from parent to child event
+   */
+  private extractMnemonicWithFallback(parentEvent: ProfileEvent | null, childEvent: ProfileEvent): string {
+    // Try parent first
+    if (parentEvent) {
+      const parentMnemonic = this.extractMnemonic(parentEvent);
+      if (parentMnemonic !== 'Unknown') {
+        return parentMnemonic;
+      }
+    }
+    
+    // Fall back to child event
+    return this.extractMnemonic(childEvent);
   }
 
   /**

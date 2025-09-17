@@ -13,6 +13,8 @@ export interface BazelAction {
   contributingPackagesCount?: number; // Number of changed packages that caused this action
   contributingPackages?: string[]; // List of changed packages that caused this action
   transitiveDepth?: number; // How many hops from changed packages
+  category?: string; // Event category from profile (e.g., 'local action execution')
+  parentCategory?: string; // Parent event category (e.g., 'action processing')
 }
 
 export interface FileChange {
