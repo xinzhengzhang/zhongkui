@@ -1,8 +1,62 @@
 # Release Notes - 钟馗 (Zhongkui) 
 
+- v0.0.4
 - v0.0.3
 - v0.0.2
 - v0.0.1
+
+## 🎯 v0.0.4 - Advanced Filtering & Granular Analysis
+
+### ✨ New Features
+- **Package Exclusion System**: New `--exclude-packages` option for filtering out noise from analysis
+  - Exclude specified packages from attribution analysis (e.g., "genfiles,build-metadata")
+  - Supports comma-separated list of package names
+  - Useful for filtering out generated files and build metadata packages
+- **Ignore File Support**: New `--ignore-file` option with smart defaults
+  - Custom ignore file path specification (default: `.zhongkuiignore` in repo root)
+  - Automatically excludes files matching patterns in ignore file from analysis
+  - Git-style pattern matching for flexible file exclusion
+- **Custom Profile Path**: New `-p, --profile` option for `run-and-analyze` command
+  - Specify custom path for generated profile files instead of temporary files
+  - Relative paths resolved to repository root directory
+  - Enables profile persistence and custom organization
+
+### 🔧 Improvements
+- **Granular Profile Analysis**: Enhanced profile parsing for more detailed action breakdown
+  - More precise action categorization and timing analysis
+  - Improved metadata extraction from Bazel profile events
+  - Better handling of complex build graphs with multiple dependencies
+- **Memory Safety**: Added graceful error handling for JSON.stringify memory errors
+  - Prevents crashes when processing very large profile files
+  - Improved stability for memory-constrained environments
+  - Better error messages for troubleshooting large dataset issues
+
+### 🛠 Technical Details
+- Enhanced file change filtering with dual exclusion system (ignore file + CLI parameter)
+- Improved path resolution for custom profile files relative to repository root
+- Added comprehensive error handling for large data serialization
+- Optimized profile parsing pipeline for better performance and accuracy
+
+### 💡 Usage Examples
+```bash
+# Exclude generated packages from analysis
+zhongkui run-and-analyze -c "bazel build //app:*" --exclude-packages "genfiles,proto_gen,build_metadata"
+
+# Use custom ignore file location
+zhongkui run-and-analyze -c "bazel build //app:*" --ignore-file "./custom.ignore"
+
+# Save profile to specific location
+zhongkui run-and-analyze -c "bazel build //app:*" -p "./profiles/build-$(date +%Y%m%d).json"
+
+# Combined advanced usage
+zhongkui run-and-analyze \
+  -c "bazel build //app:* --config=release" \
+  -p "./analysis/profile-$(git rev-parse --short HEAD).json" \
+  --exclude-packages "genfiles,external_deps" \
+  --ignore-file "./.build-ignore"
+```
+
+**Impact**: More precise analysis by filtering out noise, custom profile management, and improved reliability for large-scale builds.
 
 ## 🚀 v0.0.3 - Enhanced CLI & Output Control
 
