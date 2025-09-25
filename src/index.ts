@@ -688,12 +688,14 @@ program
   .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
+  .option('-l, --logfile <path>', 'Custom path for the build log file (default: temporary file in temp directory)')
   .option('--verbose', 'Enable verbose logging')
   .option('--redirect-stdio', 'Redirect Bazel command output to current stdout/stderr in addition to log file')
   .action(async (options) => {
     let profilePath: string;
     let logFilePath: string;
     let isCustomProfile = false; // Track if using custom profile path
+    let isCustomLogfile = false; // Track if using custom log path
     const tempDir = await mkdtemp(join(tmpdir(), 'zhongkui-profile-'));
     
     try {
@@ -726,7 +728,20 @@ program
       }
       
       // Create log file path
-      logFilePath = join(tempDir, 'bazel-build.log');
+      if (options.logfile) {
+        // Use custom log file path - resolve relative to repo root
+        logFilePath = resolve(options.repoRoot, options.logfile);
+        isCustomLogfile = true;
+        logger.info(`Using custom log file path: ${logFilePath}`);
+
+        // Ensure the directory exists
+        const logDir = dirname(logFilePath);
+        await mkdir(logDir, { recursive: true });
+      } else {
+        // Use temporary log file
+        logFilePath = join(tempDir, 'bazel-build.log');
+        logger.info(`Using temporary log file path: ${logFilePath}`);
+      }
       
       // Construct the modified Bazel command with profiling
       let profileArgs = [];
@@ -762,9 +777,8 @@ program
         excludePackages: options.excludePackages,
         ignoreFile: options.ignoreFile
       });
-      
-      // Clean up temporary files unless --keep-profile is specified
-      if (!options.keepProfile && !isCustomProfile && profilePath) {
+
+      if (!options.keepProfile && !isCustomProfile && !isCustomLogfile) {
         logger.info('Cleaning up temporary profile and log files');
         await rm(profilePath, { force: true });
         if (logFilePath) {
@@ -777,22 +791,16 @@ program
           // Ignore error if directory is not empty (contains other files)
           logger.debug('Temp directory cleanup skipped (may contain other files)');
         }
-      } else if (options.keepProfile || isCustomProfile) {
+      } else {
         console.log(`${colors.bright}${colors.cyan}📁 Files kept:${colors.reset}`);
         console.log(`${colors.bright}${colors.green}   Profile: ${profilePath}${colors.reset}`);
-        if (logFilePath) {
-          console.log(`${colors.bright}${colors.green}   Log:     ${logFilePath}${colors.reset}`);
-        }
-        if (isCustomProfile) {
-          console.log(`${colors.bright}${colors.yellow}   Note: Using custom profile path (not cleaned up automatically)${colors.reset}`);
-        }
+        console.log(`${colors.bright}${colors.green}   Log:     ${logFilePath}${colors.reset}`);
       }
       
     } catch (error) {
       logger.error('Run and analyze failed:', error);
       
-      // Clean up on error unless --keep-profile is specified or using custom profile
-      if (!options.keepProfile && !isCustomProfile) {
+      if (!options.keepProfile && !isCustomProfile && !isCustomLogfile) {
         try {
           await rm(profilePath, { force: true });
           if (logFilePath) {
