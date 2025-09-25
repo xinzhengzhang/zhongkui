@@ -62,18 +62,20 @@ export class ProfileAnalyzer {
     const actions: BazelAction[] = [];
     
     // Step 1: Extract parent events for target information
-    const parentEvents = profileData.traceEvents.filter(event => 
-      event.cat === 'action processing' && 
-      event.ph === 'X' && 
-      event.dur !== undefined
+    const parentEvents = profileData.traceEvents.filter(event =>
+      event.cat === 'action processing' &&
+      event.ph === 'X' &&
+      event.dur !== undefined &&
+      event.dur > 0
     );
     
     // Step 2: Extract child events for actual timing
     const childCategories = ['local action execution', 'complete action execution'];
-    const childEvents = profileData.traceEvents.filter(event => 
-      childCategories.includes(event.cat) && 
-      event.ph === 'X' && 
-      event.dur !== undefined
+    const childEvents = profileData.traceEvents.filter(event =>
+      childCategories.includes(event.cat) &&
+      event.ph === 'X' &&
+      event.dur !== undefined &&
+      event.dur > 0
     );
     
     logger.info(`Found ${parentEvents.length} parent events (action processing) and ${childEvents.length} child events (execution)`);
@@ -174,21 +176,6 @@ export class ProfileAnalyzer {
     // Use child event's timing data (this is what we want for attribution)
     const duration = Math.round((childEvent.dur || 0) / 1000);
     const startTime = Math.round(childEvent.ts / 1000);
-    
-    // Extract inputs and outputs from both parent and child
-    const inputs: string[] = [];
-    const outputs: string[] = [];
-    
-    // Prefer parent event's args for inputs/outputs (more complete)
-    const argsToUse = parentEvent?.args || childEvent.args;
-    if (argsToUse) {
-      if (argsToUse.inputs) {
-        inputs.push(...this.parseFileList(argsToUse.inputs));
-      }
-      if (argsToUse.outputs) {
-        outputs.push(...this.parseFileList(argsToUse.outputs));
-      }
-    }
 
     // Generate unique ID that includes both parent and child info
     const parentInfo = parentEvent ? `_p${Math.round(parentEvent.ts / 1000)}` : '';
@@ -201,8 +188,6 @@ export class ProfileAnalyzer {
       duration, // This is from child event - the actual execution time we care about
       startTime,
       endTime: startTime + duration,
-      inputs,
-      outputs,
       // Additional metadata to track the source
       category: childEvent.cat,
       parentCategory: parentEvent?.cat
@@ -259,19 +244,6 @@ export class ProfileAnalyzer {
     // Convert microseconds to milliseconds
     const duration = Math.round((event.dur || 0) / 1000);
     const startTime = Math.round(event.ts / 1000);
-    
-    // Extract inputs and outputs from args if available
-    const inputs: string[] = [];
-    const outputs: string[] = [];
-    
-    if (event.args) {
-      if (event.args.inputs) {
-        inputs.push(...this.parseFileList(event.args.inputs));
-      }
-      if (event.args.outputs) {
-        outputs.push(...this.parseFileList(event.args.outputs));
-      }
-    }
 
     return {
       id: `${target}_${startTime}`, // Generate unique ID
@@ -279,9 +251,7 @@ export class ProfileAnalyzer {
       mnemonic: this.extractMnemonic(event),
       duration,
       startTime,
-      endTime: startTime + duration,
-      inputs,
-      outputs
+      endTime: startTime + duration
     };
   }
 
