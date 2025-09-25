@@ -1,9 +1,51 @@
-# Release Notes - 钟馗 (Zhongkui) 
+# Release Notes - 钟馗 (Zhongkui)
 
+- v0.0.5
 - v0.0.4
 - v0.0.3
 - v0.0.2
 - v0.0.1
+
+## 🔧 v0.0.5 - Build Logging & Code Optimization
+
+### ✨ New Features
+- **Custom Log File Path**: New `-l, --logfile` option for `run-and-analyze` command
+  - Specify custom path for generated build log files instead of temporary files
+  - Relative paths resolved to repository root directory
+  - Enables log persistence and custom organization
+  - Automatic directory creation for specified log file paths
+
+### 🛠 Improvements
+- **ProfileEvent Optimization**: Streamlined profile parsing for better performance
+  - Removed unused `inputs` and `outputs` fields from ProfileEvent type
+  - Added filtering to exclude zero-duration events from analysis
+  - Reduced memory footprint for large profile files
+  - Improved parsing efficiency by focusing on actionable timing data
+- **Code Cleanup**: Enhanced codebase maintainability
+  - Removed unused functions from profile analyzer
+  - Fixed `changedPackages` length calculation in hotspot reporter
+  - Cleaner and more efficient codebase
+
+### 🛠 Technical Details
+- Enhanced CLI argument processing for custom log file paths with proper validation
+- Optimized ProfileEvent interface by removing non-essential fields
+- Improved profile parsing pipeline to skip irrelevant zero-duration events
+- Better error handling for custom log file directory creation
+
+### 💡 Usage Examples
+```bash
+# Use custom log file path
+zhongkui run-and-analyze -c "bazel build //app:*" -l "./logs/build-$(date +%Y%m%d).log"
+
+# Combined with other options
+zhongkui run-and-analyze \
+  -c "bazel build //app:* --config=release" \
+  -p "./profiles/profile-$(git rev-parse --short HEAD).json" \
+  -l "./logs/build-$(git rev-parse --short HEAD).log" \
+  --exclude-packages "genfiles,external_deps"
+```
+
+**Impact**: Better build log management with custom paths and improved performance through optimized profile parsing.
 
 ## 🎯 v0.0.4 - Advanced Filtering & Granular Analysis
 
