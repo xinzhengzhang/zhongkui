@@ -5,8 +5,6 @@ export interface BazelAction {
   target: string;
   mnemonic: string;
   duration: number;
-  inputs: string[];
-  outputs: string[];
   package?: string; // Resolved package path
   startTime?: number;
   endTime?: number;

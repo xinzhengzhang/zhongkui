@@ -43,7 +43,7 @@ src/
 - **Action Events**: Extracts events with `cat: "action"` and `ph: "X"` (complete events)
 - **Target Extraction**: Uses regex patterns to extract Bazel targets from event names
 - **Timing Data**: Converts microsecond timestamps to milliseconds for analysis
-- **Metadata**: Extracts mnemonics, inputs, outputs when available in profile args
+- **Metadata**: Extracts mnemonics when available in profile args
 
 ### Key Architecture Decisions
 
