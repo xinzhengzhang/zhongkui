@@ -97,7 +97,7 @@ export class HotspotReporter {
     );
     
     return {
-      changedPackages: changedPackages.length,
+      changedPackages: changedPackageHotspots.length,
       totalActualCompilationTime: totalActualTime,
       totalTransitiveCompilationTime: totalTransitiveTime,
       packageBreakdown: changedPackageHotspots.map(h => ({
