@@ -227,35 +227,6 @@ export class ProfileAnalyzer {
   }
 
   /**
-   * Parse a single action event into BazelAction
-   */
-  private parseActionEvent(event: ProfileEvent): BazelAction | null {
-    // Extract target information from event name or args
-    // Event name formats vary, but typically include target info:
-    // - "//path/to/package:target_name"  
-    // - "SomeAction //path/to/package:target_name"
-    // - "action '//path/to/package:target_name'"
-    
-    const target = this.extractTargetFromEvent(event);
-    if (!target) {
-      return null;
-    }
-
-    // Convert microseconds to milliseconds
-    const duration = Math.round((event.dur || 0) / 1000);
-    const startTime = Math.round(event.ts / 1000);
-
-    return {
-      id: `${target}_${startTime}`, // Generate unique ID
-      target,
-      mnemonic: this.extractMnemonic(event),
-      duration,
-      startTime,
-      endTime: startTime + duration
-    };
-  }
-
-  /**
    * Extract target label from profile event
    */
   private extractTargetFromEvent(event: ProfileEvent): string | null {
