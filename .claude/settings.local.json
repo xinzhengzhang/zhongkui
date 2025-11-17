@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(bazel build:*)",
+      "Bash(bazel run:*)",
+      "Bash(bazel info:*)",
+      "Read(//private/var/tmp/_bazel_huangyimin/28d0b76f4ac63369082eef7acd727d48/**)"
     ],
     "deny": [],
     "ask": []
