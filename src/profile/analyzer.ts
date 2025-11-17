@@ -1,4 +1,6 @@
 import { readFile } from 'fs/promises';
+import { createReadStream } from 'fs';
+import { createGunzip } from 'zlib';
 import { BazelAction } from '../types';
 import { logger } from '../utils/logger';
 
@@ -45,11 +47,40 @@ export class ProfileAnalyzer {
   }
 
   /**
-   * Load profile data from JSON file
+   * Load profile data from JSON file (supports both .json and .gz files)
    */
   private async loadProfileData(profilePath: string): Promise<ProfileData> {
+    // Check if file is gzip compressed
+    if (profilePath.endsWith('.gz')) {
+      return this.loadGzipProfileData(profilePath);
+    }
+
     const content = await readFile(profilePath, 'utf-8');
     return JSON.parse(content);
+  }
+
+  /**
+   * Load profile data from gzip compressed file
+   */
+  private async loadGzipProfileData(gzipPath: string): Promise<ProfileData> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const gunzip = createGunzip();
+
+      createReadStream(gzipPath)
+        .pipe(gunzip)
+        .on('data', (chunk) => chunks.push(chunk))
+        .on('end', () => {
+          try {
+            const content = Buffer.concat(chunks).toString('utf-8');
+            const data = JSON.parse(content);
+            resolve(data);
+          } catch (error) {
+            reject(error);
+          }
+        })
+        .on('error', reject);
+    });
   }
 
   /**

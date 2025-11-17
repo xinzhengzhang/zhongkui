@@ -1,10 +1,77 @@
 # Release Notes - 钟馗 (Zhongkui)
 
+- v0.0.6
 - v0.0.5
 - v0.0.4
 - v0.0.3
 - v0.0.2
 - v0.0.1
+
+## 🎯 v0.0.6 - BuildBuddy Integration & Default Profile Support
+
+### ✨ New Features
+- **Default Profile Detection**: Automatic profile detection from Bazel's `output_base`
+  - When `--profile` option is not specified, automatically locates the latest profile from `output_base`
+  - Finds profile files matching pattern `command-{invocation_id}.profile.gz`
+  - **BuildBuddy Compatible**: Prevents BuildBuddy error "Could not find profile info" by using default profiles
+  - No need to manually specify `--profile` flag for `run-and-analyze` command
+- **Gzip Profile Support**: Native support for compressed profile files
+  - Automatically detects and decompresses `.profile.gz` files
+  - Works with both custom profile paths and default profiles from `output_base`
+  - Reduces disk space usage for profile storage
+
+### 🛠 Improvements
+- **Enhanced ProfileAnalyzer**: Extended to handle both `.json` and `.gz` profile formats
+  - Streaming decompression for efficient memory usage
+  - Automatic format detection based on file extension
+  - Backward compatible with existing `.json` profiles
+- **New ProfileLocator Module**: Dedicated module for profile file discovery
+  - Queries Bazel for `output_base` location
+  - Sorts profiles by modification time to find latest
+  - Handles decompression to temporary files with automatic cleanup
+  - Integrates seamlessly with existing analysis pipeline
+
+### 🔄 Changed
+- **`run-and-analyze` Command**: Default behavior updated for BuildBuddy compatibility
+  - No longer adds `--profile` flag to Bazel commands by default
+  - Uses Bazel's default profile generation in `output_base`
+  - Custom profile path still supported via `-p, --profile` option
+  - Help text updated to reflect new default behavior
+
+### 🛠 Technical Details
+- New `ProfileLocator` class with three key methods:
+  - `getOutputBase()`: Retrieves Bazel output_base via `bazel info`
+  - `findLatestProfile()`: Locates most recent profile by modification time
+  - `locateDefaultProfile()`: Orchestrates profile discovery and decompression
+- `ProfileAnalyzer.loadProfileData()` enhanced with gzip detection and streaming decompression
+- Temporary decompressed profiles automatically cleaned up unless `--keep-profile` is specified
+- Respects Bazel startup options when querying `output_base`
+
+### 💡 Usage Examples
+```bash
+# Use default profile from output_base (recommended for BuildBuddy)
+zhongkui run-and-analyze -c "bazel build //app:*"
+
+# Still works with custom profile path
+zhongkui run-and-analyze -c "bazel build //app:*" -p "./my-profile.json"
+
+# Analyze existing compressed profile
+zhongkui analyze -p command-abc123.profile.gz -c "bazel build //app:*"
+
+# Combined with BuildBuddy and other options
+zhongkui run-and-analyze \
+  -c "bazel build //app:* --config=release" \
+  --exclude-packages "genfiles,external_deps" \
+  --verbose
+```
+
+### 🐛 Fixed
+- **BuildBuddy Compatibility**: Resolved "Could not find profile info" error
+  - BuildBuddy now correctly locates profile files in default location
+  - Profile redirection no longer interferes with BuildBuddy backend
+  - Both zhongkui and BuildBuddy can analyze the same build invocation
+
+**Impact**: Seamless integration with BuildBuddy while maintaining full analysis capabilities. Simplified workflow by eliminating need to specify custom profile paths.
 
 ## 🔧 v0.0.5 - Build Logging & Code Optimization
 

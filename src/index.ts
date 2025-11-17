@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { ProfileAnalyzer } from './profile/analyzer';
+import { ProfileLocator } from './profile/locator';
 import { DiffAnalyzer, AdditionalRepo } from './diff/analyzer';
 import { SimpleDependencyAnalyzer } from './dependency/simple-analyzer';
 import { HotspotReporter } from './hotspot/reporter';
@@ -618,7 +619,7 @@ const program = new Command();
 program
   .name('zhongkui')
   .description('Analyze build hotspots in Bazel monorepos')
-  .version('0.0.3');
+  .version('0.0.6');
 
 program
   .command('analyze')
@@ -682,7 +683,7 @@ program
   .option('-r, --repo-root <path>', 'Repository root path', process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd())
   .option('-b, --base-branch <branch>', 'Base branch for git diff comparison', 'origin/master')
   .option('-o, --output-dir <path>', 'Output directory for reports', 'report/')
-  .option('-p, --profile <path>', 'Custom path for the generated profile file (default: temporary file)')
+  .option('-p, --profile <path>', 'Custom path for the generated profile file (default: use default profile from output_base)')
   .option('--additional-repos <paths>', 'Comma-separated paths to additional sub-bazel repositories to scan for changes. Format: "path" or "path:reponame"')
   .option('--exclude-packages <packages>', 'Comma-separated list of packages to exclude from attribution analysis (e.g., "genfiles,build-metadata")')
   .option('--ignore-file <path>', 'Path to .zhongkuiignore file (default: .zhongkuiignore in repo root)')
@@ -696,37 +697,38 @@ program
     let logFilePath: string;
     let isCustomProfile = false; // Track if using custom profile path
     let isCustomLogfile = false; // Track if using custom log path
+    let shouldUseDefaultProfile = !options.profile; // Track if we should use default profile from output_base
     const tempDir = await mkdtemp(join(tmpdir(), 'zhongkui-profile-'));
-    
+
     try {
       if (options.verbose) {
         enableVerbose();
       }
-      
+
       // Parse and resolve additional repositories relative to repo-root
       const additionalRepos = resolveAdditionalRepos(options.additionalRepos, options.repoRoot);
-      
+
       logger.info(`Executing Bazel command: ${options.command}`);
-      
+
       // Parse the Bazel command
       const parsed = parseBazelCommand(options.command);
       logger.info(`Parsed command - Binary: ${parsed.bazelBinary}, Targets: ${parsed.targets}`);
-      
+
       if (options.profile) {
         // Use custom profile path - resolve relative to repo root (original CLI directory)
         profilePath = resolve(options.repoRoot, options.profile);
         isCustomProfile = true;
         logger.info(`Using custom profile path: ${profilePath}`);
-        
+
         // Ensure the directory exists
         const profileDir = dirname(profilePath);
         await mkdir(profileDir, { recursive: true });
       } else {
-        // Create temporary profile file
-        profilePath = join(tempDir, 'profile.json');
-        logger.info(`Using temporary profile path: ${profilePath}`);
+        // Will use default profile from output_base after build
+        profilePath = ''; // Placeholder, will be set after build
+        logger.info(`Will use default profile from output_base after build`);
       }
-      
+
       // Create log file path
       if (options.logfile) {
         // Use custom log file path - resolve relative to repo root
@@ -742,26 +744,51 @@ program
         logFilePath = join(tempDir, 'bazel-build.log');
         logger.info(`Using temporary log file path: ${logFilePath}`);
       }
-      
-      // Construct the modified Bazel command with profiling
+
+      // Construct the modified Bazel command
       let profileArgs = [];
       if (parsed.startupOpts) {
         profileArgs.push(...parsed.startupOpts.split(/\s+/).filter(arg => arg));
       }
       profileArgs.push(parsed.command);
-      profileArgs.push(`--profile=${profilePath}`);
+
+      // Only add --profile flag if custom profile path is specified
+      if (isCustomProfile) {
+        profileArgs.push(`--profile=${profilePath}`);
+      }
+
       if (parsed.commandOpts) {
         profileArgs.push(...parsed.commandOpts.split(/\s+/).filter(arg => arg));
       }
       // Add build optimization flags for better output
       profileArgs.push('--curses=no', '--color=yes', '--noprogress_in_terminal_title');
       profileArgs.push(...parsed.targets.split(/\s+/).filter(arg => arg));
-      
+
       // Execute the Bazel command with profiling and log file output
       await executeCommandWithLog(parsed.bazelBinary, profileArgs, options.repoRoot, logFilePath, options.redirectStdio);
-      
+
+      // If using default profile, locate it now
+      if (shouldUseDefaultProfile) {
+        logger.info('Locating default profile from output_base');
+        const profileLocator = new ProfileLocator();
+        const { profilePath: defaultProfilePath, isTemporary } = await profileLocator.locateDefaultProfile(
+          options.repoRoot,
+          parsed.bazelBinary,
+          parsed.startupOpts
+        );
+        profilePath = defaultProfilePath;
+
+        // If we found a temporary decompressed profile, we should clean it up later
+        if (isTemporary && !options.keepProfile) {
+          // Mark it for cleanup
+          isCustomProfile = false;
+        }
+
+        logger.info(`Using default profile: ${profilePath}`);
+      }
+
       logger.info(`Profile generated at: ${profilePath}`);
-      
+
       // Now analyze the generated profile
       await executeAnalyze({
         profile: profilePath,
@@ -796,13 +823,15 @@ program
         console.log(`${colors.bright}${colors.green}   Profile: ${profilePath}${colors.reset}`);
         console.log(`${colors.bright}${colors.green}   Log:     ${logFilePath}${colors.reset}`);
       }
-      
+
     } catch (error) {
       logger.error('Run and analyze failed:', error);
-      
+
       if (!options.keepProfile && !isCustomProfile && !isCustomLogfile) {
         try {
-          await rm(profilePath, { force: true });
+          if (profilePath) {
+            await rm(profilePath, { force: true });
+          }
           if (logFilePath) {
             await rm(logFilePath, { force: true });
           }
@@ -816,7 +845,7 @@ program
           logger.warn('Failed to clean up temporary files:', cleanupError);
         }
       }
-      
+
       process.exit(1);
     }
   });
