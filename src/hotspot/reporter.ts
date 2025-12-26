@@ -29,29 +29,25 @@ export class HotspotReporter {
 
     const fileName = join(outputDir, `report-${analysis.invocationId || Date.now()}-${Date.now()}.json`);
     
-    // Handle potential JSON.stringify memory errors gracefully
-    try {
-      await writeFile(fileName, JSON.stringify(report, null, null));
-    } catch (error) {
-      if (error instanceof RangeError && error.message.includes('Invalid string length')) {
-        logger.warn('Report data too large for JSON serialization, generating simplified report');
-        
-        // Create a simplified report without hotspots
-        const simplifiedReport = {
-          invocationId: analysis.invocationId,
-          timestamp: new Date().toISOString(),
-          summary: report.summary,
-          changedPackagesAnalysis: report.changedPackagesAnalysis,
-          fileChanges: report.fileChanges,
-          impactedActions: report.impactedActions,
-          recommendations: report.recommendations,
-        };
-        
-        await writeFile(fileName, JSON.stringify(simplifiedReport, null, null));
-        logger.info(`Simplified JSON report generated due to memory constraints: ${fileName}`);
-      } else {
-        throw error; // Re-throw other errors
-      }
+
+    if (error instanceof RangeError && error.message.includes('Invalid string length')) {
+      logger.warn('Report data too large for JSON serialization, generating simplified report');
+      
+      // Create a simplified report without hotspots
+      const simplifiedReport = {
+        invocationId: analysis.invocationId,
+        timestamp: new Date().toISOString(),
+        summary: report.summary,
+        changedPackagesAnalysis: report.changedPackagesAnalysis,
+        fileChanges: report.fileChanges,
+        impactedActions: report.impactedActions,
+        recommendations: report.recommendations,
+      };
+      
+      await writeFile(fileName, JSON.stringify(simplifiedReport, null, null));
+      logger.info(`Simplified JSON report generated due to memory constraints: ${fileName}`);
+    } else {
+      throw error; // Re-throw other errors
     }
     
     // Also generate human-readable report
