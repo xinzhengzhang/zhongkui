@@ -479,6 +479,7 @@ async function executeAnalyze(options: {
   additionalRepos?: AdditionalRepo[];
   excludePackages?: string;
   ignoreFile?: string;
+  forceSimplified?: boolean;
 }) {
   let actualTargets: string;
   let actualBazelBinary: string;
@@ -604,13 +605,13 @@ async function executeAnalyze(options: {
   
   // Generate report using absolute output directory
   const reporter = new HotspotReporter();
-  const reportPaths = await reporter.generateReport(analysis, absoluteOutputDir);
-  
+  const reportPaths = await reporter.generateReport(analysis, absoluteOutputDir, options.forceSimplified);
+
   // Display report paths with highlighted colors
   console.log(`\n${colors.bright}${colors.cyan}📄 Analysis reports generated:${colors.reset}`);
   console.log(`${colors.bright}${colors.green}   JSON: ${reportPaths.jsonPath}${colors.reset}`);
   console.log(`${colors.bright}${colors.green}   MD:   ${reportPaths.mdPath}${colors.reset}\n`);
-  
+
   logger.info('Analysis completed successfully');
 }
 
@@ -637,6 +638,7 @@ program
   .option('--startup-opts <opts>', 'Bazel startup options (e.g., "--host_jvm_args=-Xmx4g")')
   .option('--command-opts <opts>', 'Bazel command options (e.g., "--experimental_profile_include_target_label=true")')
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
+  .option('--force-simplified', 'Force generation of simplified JSON report without hotspots array (useful for very large reports)')
   .option('--verbose', 'Enable verbose logging')
   .addHelpText('after', `
 Examples:
@@ -668,7 +670,8 @@ Examples:
         ...options,
         additionalRepos,
         excludePackages: options.excludePackages,
-        ignoreFile: options.ignoreFile
+        ignoreFile: options.ignoreFile,
+        forceSimplified: options.forceSimplified
       });
     } catch (error) {
       logger.error('Analysis failed:', error);
@@ -690,6 +693,7 @@ program
   .option('--cache-mode <mode>', 'Dependency cache mode: "force" (ignore cache), "auto" (use cache if available)', 'auto')
   .option('--keep-profile', 'Keep the generated profile file after analysis')
   .option('-l, --logfile <path>', 'Custom path for the build log file (default: temporary file in temp directory)')
+  .option('--force-simplified', 'Force generation of simplified JSON report without hotspots array (useful for very large reports)')
   .option('--verbose', 'Enable verbose logging')
   .option('--redirect-stdio', 'Redirect Bazel command output to current stdout/stderr in addition to log file')
   .action(async (options) => {
@@ -802,7 +806,8 @@ program
         cacheMode: options.cacheMode as 'force' | 'auto',
         additionalRepos,
         excludePackages: options.excludePackages,
-        ignoreFile: options.ignoreFile
+        ignoreFile: options.ignoreFile,
+        forceSimplified: options.forceSimplified
       });
 
       if (!options.keepProfile && !isCustomProfile && !isCustomLogfile) {
