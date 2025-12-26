@@ -9,8 +9,11 @@ import { logger } from '../utils/logger';
 export class HotspotReporter {
   /**
    * Generate a comprehensive report for a single build analysis
+   * @param analysis Build analysis data
+   * @param outputDir Output directory for reports
+   * @param forceSimplified If true, always generate simplified report without hotspots array
    */
-  async generateReport(analysis: BuildAnalysis, outputDir: string = 'report/'): Promise<{jsonPath: string, mdPath: string}> {
+  async generateReport(analysis: BuildAnalysis, outputDir: string = 'report/', forceSimplified?: boolean): Promise<{jsonPath: string, mdPath: string}> {
     logger.info(`Generating report for profile: ${analysis.profileId}`);
 
     // Ensure output directory exists
@@ -28,29 +31,48 @@ export class HotspotReporter {
     };
 
     const fileName = join(outputDir, `report-${analysis.invocationId || Date.now()}-${Date.now()}.json`);
-    
-    // Handle potential JSON.stringify memory errors gracefully
-    try {
-      await writeFile(fileName, JSON.stringify(report, null, null));
-    } catch (error) {
-      if (error instanceof RangeError && error.message.includes('Invalid string length')) {
-        logger.warn('Report data too large for JSON serialization, generating simplified report');
-        
-        // Create a simplified report without hotspots
-        const simplifiedReport = {
-          invocationId: analysis.invocationId,
-          timestamp: new Date().toISOString(),
-          summary: report.summary,
-          changedPackagesAnalysis: report.changedPackagesAnalysis,
-          fileChanges: report.fileChanges,
-          impactedActions: report.impactedActions,
-          recommendations: report.recommendations,
-        };
-        
-        await writeFile(fileName, JSON.stringify(simplifiedReport, null, null));
-        logger.info(`Simplified JSON report generated due to memory constraints: ${fileName}`);
-      } else {
-        throw error; // Re-throw other errors
+
+    // Determine if we should write simplified report
+    const shouldSimplify = forceSimplified || analysis.packageHotspots.length > 200;
+
+    if (shouldSimplify) {
+      // Write simplified report directly
+      const simplifiedReport = {
+        invocationId: analysis.invocationId,
+        timestamp: new Date().toISOString(),
+        summary: report.summary,
+        changedPackagesAnalysis: report.changedPackagesAnalysis,
+        fileChanges: report.fileChanges,
+        impactedActions: report.impactedActions,
+        recommendations: report.recommendations,
+      };
+
+      await writeFile(fileName, JSON.stringify(simplifiedReport, null, null));
+      logger.info(`Simplified JSON report generated (${analysis.packageHotspots.length} packages): ${fileName}`);
+    } else {
+      // Try to write full report, fallback to simplified on error
+      try {
+        await writeFile(fileName, JSON.stringify(report, null, null));
+      } catch (error) {
+        if (error instanceof RangeError && error.message.includes('Invalid string length')) {
+          logger.warn('Report data too large for JSON serialization, generating simplified report');
+
+          // Create a simplified report without hotspots
+          const simplifiedReport = {
+            invocationId: analysis.invocationId,
+            timestamp: new Date().toISOString(),
+            summary: report.summary,
+            changedPackagesAnalysis: report.changedPackagesAnalysis,
+            fileChanges: report.fileChanges,
+            impactedActions: report.impactedActions,
+            recommendations: report.recommendations,
+          };
+
+          await writeFile(fileName, JSON.stringify(simplifiedReport, null, null));
+          logger.info(`Simplified JSON report generated due to memory constraints: ${fileName}`);
+        } else {
+          throw error; // Re-throw other errors
+        }
       }
     }
     
